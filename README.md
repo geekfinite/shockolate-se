@@ -1,8 +1,10 @@
 **Shockolate SE - SHODAN Enhanced**
+
 *based on System Shock Enhanced - based on Shockolate*
 
 Fork of Shockolate Enhanced Edition, implementing (and introducing some more haha) crash fixes and widescreen support.
-_SHODAN Enhanced means all the new code by AI models._
+
+_SHODAN Enhanced means all the new code is written by AI models._
 _I claim no authorship for said code and intend this to be more of a working blueprint._
 
 **Implemented features so far:**
