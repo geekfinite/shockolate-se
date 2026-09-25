@@ -25,7 +25,8 @@ Custom values can be supplied with -hud-bounds key, e.g _-hud-bounds 4:3/16:9/5:
 - **_High-res SS:EE resources_** - yet to touch that.
 - **_Rendering distance_** - doesn't occur that much but holes in 16:9 and wider sometimes become noticeable.
 - **_Something else that may come up later_**
-
+- **_Make building more user-friendly/supply Win32-64 binaries_**
+  
 OG README goes next
 
 System Shock Enhanced - based on Shockolate
