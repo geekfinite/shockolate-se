@@ -420,8 +420,19 @@ void gamesys_render_effects(void) {
                     }
                 }
                 if ((handart_show != 1) || ready_to_draw_handart()) {
-                    // draw_hires_resource_bm(temp, SCONV_X(deltax), SCONV_Y(deltay));
-                    draw_res_bm(temp, deltax, deltay);
+                    if (full_game_3d) {
+                        // The weapon sprite is part of the fullscreen HUD: draw
+                        // it at the HUD's INTEGER scale (crisp whole-pixel art)
+                        // instead of the SCONV resolution ratio, which is
+                        // fractional on non-4:3 modes. Position is unchanged.
+                        extern float hud_scale_factor(void);
+                        int k = (int)(hud_scale_factor() + 0.5f);
+                        if (k < 1)
+                            k = 1;
+                        draw_res_bm_iscale(temp, SCONV_X(deltax), SCONV_Y(deltay), k);
+                    } else {
+                        draw_res_bm(temp, deltax, deltay);
+                    }
                     notify_draw_handart();
                 }
             }
@@ -531,6 +542,12 @@ void draw_full_static(
     int c_base) { // note we do this as a for, not a big fill, so it will work with row hacks, full screen, so on....
     uchar *line_base;
     int y;
+
+// DeepSeek's temp fix
+    if (stat_dest == NULL) {
+        WARN("%s: called with NULL stat_dest!", __FUNCTION__);
+        return;
+    }
 
     for (line_base = stat_dest->bits, y = 0; y < stat_dest->h; y++, line_base += stat_dest->row)
         draw_single_static_line(line_base, 0, stat_dest->w, c_base);

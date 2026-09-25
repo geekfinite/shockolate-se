@@ -1,5 +1,6 @@
 #ifdef USE_OPENGL
 
+#include <cmath>
 #include <cstdio>
 #include "OpenGL.h"
 
@@ -104,12 +105,68 @@ static GLuint bound_texture = -1;
 
 // View matrix; Z offset experimentally tweaked for near-perfect alignment
 // between GL projection and software projection (sprite screen coordinates)
-static const float ViewMatrix[] = {1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -0.01, 1.0};
+// View matrix; Z offset (element 14, the Z-translation term) originally
+// hardcoded to -0.01, experimentally tweaked for near-perfect alignment
+// between GL projection and software projection (sprite screen
+// coordinates) -- at the time, tuned as a matched pair with
+// ProjectionMatrix's scale, both fixed at the old hardcoded FOV of
+// 89.5 degrees (scale 1.00876). Now that ProjectionMatrix's scale moves
+// with the FOV slider (see opengl_update_fov()) but this Z offset didn't,
+// the two are mismatched at every FOV except that original 89.5 degrees
+// -- including the actual default of 80 degrees. opengl_update_fov()
+// below now rescales this proportionally too, so they stay matched the
+// way they originally were tuned, at any FOV.
+static float ViewMatrix[] = {1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -0.01, 1.0};
 
-// Projection matrix; experimentally tweaked for near-perfect alignment:
-// FOV 89.5 deg, aspect ratio 1:1, near plane 0, far plane 100
-static const float ProjectionMatrix[] = {1.00876, 0.0, 0.0,  0.0,  0.0, 1.00876, 0.0, 0.0,
-                                         0.0,     0.0, -1.0, -1.0, 0.0, 0.0,     0.0, 0.0};
+// Projection matrix; originally a compile-time constant hardcoded for
+// exactly FOV 89.5 deg, near plane 0, far plane 100. [0] and [5] are the
+// standard symmetric-perspective diagonal terms (1/tan(fov/2), e.g.
+// 1.00876 = 1/tan(89.5deg/2)); being const is why the FOV slider used to
+// be hard-locked to 80 degrees whenever OpenGL was active (see the
+// doUseOpenGL ? 80 : ... guards in wrapper.c/Prefs.c/toggle_opengl(), now
+// removed) -- there was no way to change what got uploaded to the GPU.
+// Now mutable so opengl_update_fov() below can recompute [0]/[5] for the
+// real FOV every frame.
+static float ProjectionMatrix[] = {1.00876, 0.0, 0.0,  0.0,  0.0, 1.00876, 0.0, 0.0,
+                                    0.0,     0.0, -1.0, -1.0, 0.0, 0.0,     0.0, 0.0};
+
+// Recomputes the FOV-dependent diagonal terms of ProjectionMatrix, and
+// ViewMatrix's Z-offset (see the comment on ViewMatrix above), for a
+// given (symmetric, degrees) field of view.
+//
+// NOTE: an earlier version of this function also tried to replicate an
+// aspect-ratio correction from the software renderer's g3_get_zoom()
+// (Libraries/3D/Source/fov.c), multiplying this scale by
+// (render_height/render_width). That made the "sprites float at high
+// FOV" problem worse in a different way (sprites/2D objects sliding
+// laterally along the ground when strafing) rather than better, which
+// means that derivation was wrong somewhere -- it's not simply a missing
+// width/height term. Reverted back to the plain, aspect-independent
+// formula below (matching the original hardcoded constant's own math,
+// just no longer frozen at exactly 89.5 deg).
+
+static float spriteFovScale = 1.0f;
+
+void opengl_update_fov(float fov_degrees) {
+    if (fov_degrees <= 0.0f || fov_degrees >= 180.0f) {
+        WARN("opengl_update_fov: ignoring out-of-range FOV %f", fov_degrees);
+        return;
+    }
+
+    float scale = 1.0f / tanf((fov_degrees * 3.14159265358979323846f / 180.0f) / 2.0f);
+    ProjectionMatrix[0] = scale;
+    ProjectionMatrix[5] = scale;
+
+    // Keep ViewMatrix's Z-offset proportionally matched to this scale,
+    // the same ratio it was originally tuned at (-0.01 paired with the
+    // old fixed scale of 1.00876, i.e. FOV 89.5 deg) -- see the comment
+    // on ViewMatrix's declaration. Reduces to exactly -0.01 at 89.5 deg
+    // (the value's original, presumably-correct tuning point) and scales
+    // from there rather than staying frozen while the projection scale
+    // it was matched against moves underneath it.
+    ViewMatrix[14] = -0.01f * (scale / 1.00876f);
+    spriteFovScale = scale / 1.00876f;
+}
 
 // Identity matrix for sprite rendering
 static const float IdentityMatrix[] = {1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0};
@@ -295,6 +352,11 @@ int init_opengl() {
         return 1;
     }
 
+    // Match the projection matrix to whatever FOV is actually configured,
+    // rather than leaving it at the 89.5 deg default baked into
+    // ProjectionMatrix's initializer.
+    opengl_update_fov((float)global_fov);
+
     // Can we create the world rendering context?
     context = SDL_GL_CreateContext(window);
     if (context == nullptr) {
@@ -430,6 +492,12 @@ void opengl_start_frame() {
     render_height = logical_height;
     render_width = logical_width;
 
+    // Recompute every frame rather than only on explicit FOV-change
+    // events: render_width/height can change (window resize, mode
+    // switch) independently of global_fov, and this is cheap enough
+    // (a couple of trig calls) to not bother caching.
+    opengl_update_fov((float)global_fov);
+
     // Update the palettes for this frame
     updatePalette(opaquePalette, false);
     updatePalette(transparentPalette, true);
@@ -506,7 +574,7 @@ void toggle_opengl() {
         case 0: {
             message_info("Switching to OpenGL bilinear rendering");
             gShockPrefs.doTextureFilter = 1;
-			global_fov = 80;
+			global_fov = gShockPrefs.doFov;
 			global_update_fov();
         } break;
         case 1: {
@@ -521,7 +589,7 @@ void toggle_opengl() {
         message_info("Switching to OpenGL unfiltered");
         gShockPrefs.doUseOpenGL = true;
         gShockPrefs.doTextureFilter = 0;
-		global_fov = 80;
+		global_fov = gShockPrefs.doFov;
 		global_update_fov();
     }
     SavePrefs();
@@ -751,9 +819,12 @@ int opengl_light_tmap(int n, g3s_phandle *vp, grs_bitmap *bm) {
     return CLIP_NONE;
 }
 
-static float convx(float x) { return x / 32768.0f / render_width - 1; }
+// static float convx(float x) { return x / 32768.0f / render_width - 1; }
+//
+// static float convy(float y) { return -y / 32768.0f / render_height + 1; }
 
-static float convy(float y) { return -y / 32768.0f / render_height + 1; }
+static float convx(float x) { return (x / 32768.0f / render_width  - 1.0f) * spriteFovScale; }
+static float convy(float y) { return (-y / 32768.0f / render_height + 1.0f) * spriteFovScale; }
 
 int opengl_bitmap(grs_bitmap *bm, int n, grs_vertex **vpl, grs_tmap_info *ti) {
     if (n != 4) {

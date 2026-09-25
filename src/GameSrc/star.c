@@ -171,7 +171,7 @@ void star_empty(int n, g3s_phandle *vp) {
     int i;
     fix m;
     int n1;
-    g3s_phandle dest[10]; // assume max clip 10
+    g3s_phandle dest[16]; // clip output can exceed the input count (n + planes)
 
     // clip it just like you would when you render
     // then run through it
@@ -312,6 +312,8 @@ void star_render(void) {
         v.gZ = ((fix)std_vec[i].z) << 1;
 
         s = star_transform_point(&v);
+        if (s == NULL)
+            break; // point pool exhausted/corrupted - stop drawing stars this frame
 
         if (s->codes == 0) {
             x = fix_rint(s->sx);
@@ -429,6 +431,8 @@ void star_rand(uchar col, uchar range) {
 }
 
 extern g3s_point *first_free;
+extern g3s_point *point_list;
+extern short n_points;
 extern g3s_matrix view_matrix;
 
 // matrix rotate and code a star point.  Project if clip codes
@@ -442,6 +446,12 @@ g3s_phandle star_transform_point(g3s_vector *v) {
     fix temp;
 
     getpnt(point);
+    // Guard against an exhausted or corrupted 3D point free list. getpnt()
+    // leaves 'point' set to first_free, which is NULL once the pool is empty;
+    // the range test additionally catches a free list that has been corrupted
+    // (a wild 'next' pointer), which otherwise faults on this first store.
+    if ((point == NULL) || (point < point_list) || (point >= point_list + n_points))
+        return (NULL);
     point->p3_flags = 0;
 
     // third column (z)

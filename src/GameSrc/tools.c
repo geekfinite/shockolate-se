@@ -187,6 +187,24 @@ errtype draw_res_bm_core(Ref id, int x, int y, uchar scale) {
 
 errtype draw_res_bm(Ref id, int x, int y) { return (draw_res_bm_core(id, x, y, TRUE)); }
 
+// Draws a resource bitmap at an INTEGER scale factor (k>=1), centred on where
+// the SCONV-scaled blit would have been placed (x,y are the real-pixel top-left
+// the unscaled blit would use). Used for the fullscreen weapon sprite so it
+// scales in whole pixels like the rest of the HUD instead of the SCONV
+// resolution ratio (which is fractional on non-4:3 modes).
+errtype draw_res_bm_iscale(Ref id, int x, int y, int k) {
+    FrameDesc *f = RefLock(id);
+    if (f == NULL)
+        critical_error(CRITERR_MEM | 9);
+    if (k < 1)
+        k = 1;
+    gr_scale_bitmap(&f->bm, x + (SCONV_X(f->bm.w) - f->bm.w * k) / 2,
+                    y + (SCONV_Y(f->bm.h) - f->bm.h * k) / 2,
+                    f->bm.w * k, f->bm.h * k);
+    RefUnlock(id);
+    return (OK);
+}
+
 // Note, does no mouse code!
 errtype draw_full_res_bm(Ref id, int x, int y, uchar fade_in) {
     FrameDesc *f;
@@ -424,21 +442,48 @@ errtype message_info(const char *info_text) {
         gr_push_canvas(grd_screen_canvas);
         STORE_CLIP(a, b, c, d);
 
-        ss_safe_set_cliprect(r->ul.x, r->ul.y, r->lr.x, r->lr.y);
-        if (!full_game_3d) {
-            y += 1;
-            if (!view360_message_obscured || game_paused) {
-                draw_raw_resource_bm(REF_IMG_bmBlankMessageLine, x, y);
-                // draw_hires_resource_bm(REF_IMG_bmBlankMessageLine,
-                //										 SCONV_X(x),
-                //SCONV_Y(y));
-            }
-            x += 2;
-        } else if (game_paused) {
+        // Fullscreen pause menu: the pause panel is drawn on the centred
+        // uniform inventory block at the isotropic HUD scale (see
+        // opanel_redraw / inventory_update_screen_mode), so the option
+        // description (the message line) belongs in that panel's message strip
+        // too -- at the 320-model message offset relative to the panel. Draw it
+        // on the screen canvas under the block override as block-logical
+        // coords (real/k), which reproduces opanel_redraw's FULL_BACK_*(0,-7)
+        // placement. (Drawing it inside inv_norm_canvas does not work: that
+        // canvas starts at the panel's top, so the strip's negative local y is
+        // clipped away. The old SCONV/ss_bounds path left the text at the raw
+        // 320-model message y, floating over the 3D view.)
+        uchar msg_in_panel = (full_game_3d && game_paused);
+        extern void inventory_block_scale_begin(void);
+        extern void inventory_block_scale_end(void);
+
+        if (msg_in_panel) {
             extern grs_canvas inv_view360_canvas;
-            ss_noscale_bitmap(&inv_view360_canvas.bm, x, y);
-            x += 2;
-            y += 1;
+            extern int inventory_block_real_x(void);
+            extern int inventory_block_real_y(void);
+            extern float hud_scale_factor(void);
+            float k = hud_scale_factor();
+            int bx, by;
+
+            inventory_block_scale_begin();
+            bx = (int)(inventory_block_real_x() / k + 0.5f);
+            by = (int)(inventory_block_real_y() / k + 0.5f) - (INVENTORY_PANEL_Y - GAME_MESSAGE_Y);
+            ss_safe_set_cliprect(bx, by, bx + GAME_MESSAGE_W, by + GAME_MESSAGE_H);
+            ss_noscale_bitmap(&inv_view360_canvas.bm, bx, by);
+            x = bx + 2;
+            y = by + 1;
+        } else {
+            ss_safe_set_cliprect(r->ul.x, r->ul.y, r->lr.x, r->lr.y);
+            if (!full_game_3d) {
+                y += 1;
+                if (!view360_message_obscured || game_paused) {
+                    draw_raw_resource_bm(REF_IMG_bmBlankMessageLine, x, y);
+                    // draw_hires_resource_bm(REF_IMG_bmBlankMessageLine,
+                    //										 SCONV_X(x),
+                    //SCONV_Y(y));
+                }
+                x += 2;
+            }
         }
         if (!message_resend && info_text != last_message && strcmp(last_message, info_text) == 0) {
             message_resend = TRUE;
@@ -455,6 +500,9 @@ errtype message_info(const char *info_text) {
                     hud_set_time(HUD_MSGLINE, 5 << APPROX_CIT_CYCLE_SHFT);
                 }
             }
+        }
+        if (msg_in_panel) {
+            inventory_block_scale_end();
         }
         RESTORE_CLIP(a, b, c, d);
         gr_pop_canvas();

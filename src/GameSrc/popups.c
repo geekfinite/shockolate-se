@@ -79,10 +79,29 @@ void make_popup_cursor(LGCursor *c, grs_bitmap *bm, char *s, uint tmplt, uchar a
     MouseLock++;
     *bm = *pbm;
 
-    // CC - Convert this to be the right size for the screen mode
+    // Fullscreen: draw the popup at the uniform HUD scale (same convention as
+    // the in-game cursor and the scaled HUD) so it isn't stretched on widescreen.
+    // Non-fullscreen: keep the SCONV scale. We override convert_x/y temporarily
+    // (the block-scale trick) so ss_bitmap/ss_string below scale uniformly.
+    extern float hud_scale_factor(void);
+    extern uchar full_game_3d;
+    fix saved_cx = convert_x[convert_type][convert_use_mode];
+    fix saved_cy = convert_y[convert_type][convert_use_mode];
+
     int sw, sh;
-    sw = SCONV_X(bm->w);
-    sh = SCONV_Y(bm->h);
+    if (full_game_3d) {
+        float k = hud_scale_factor();
+        fix kf = (fix)(k * 65536.0f);
+        convert_x[convert_type][convert_use_mode] = kf;
+        convert_y[convert_type][convert_use_mode] = kf;
+        sw = (int)(bm->w * k + 0.5f);
+        sh = (int)(bm->h * k + 0.5f);
+    } else {
+        sw = SCONV_X(bm->w);
+        sh = SCONV_Y(bm->h);
+    }
+    if (sw < 1) sw = 1;
+    if (sh < 1) sh = 1;
 
     if (allocate) {
         bptr = (uchar *)malloc(sw * sh * 2);
@@ -109,6 +128,10 @@ void make_popup_cursor(LGCursor *c, grs_bitmap *bm, char *s, uint tmplt, uchar a
     ss_string(s, x, y + 1);
     ResUnlock(RES_tinyTechFont);
     gr_pop_canvas();
+
+    // Restore the real conversion scales.
+    convert_x[convert_type][convert_use_mode] = saved_cx;
+    convert_y[convert_type][convert_use_mode] = saved_cy;
     ph = popup_hotspots[tmplt];
     p.x = (bm->w * ph.x) >> 4;
     p.y = (bm->h * ph.y) >> 4;
@@ -129,9 +152,9 @@ void load_string_array(Ref first, char *arry[], char buf[], int bufsz, int n) {
 }
 
 #ifdef SVGA_SUPPORT
-static char cursor_buf[4096];
+static char cursor_buf[65536];
 #else
-static char cursor_buf[512];
+static char cursor_buf[32768];
 #endif
 
 void make_email_cursor(LGCursor *c, grs_bitmap *bm, uchar page, bool init) {
@@ -143,8 +166,23 @@ void make_email_cursor(LGCursor *c, grs_bitmap *bm, uchar page, bool init) {
 #ifdef SVGA_SUPPORT
     short temp;
     uchar old_over = gr2ss_override;
+    fix saved_cx, saved_cy;
+    extern float hud_scale_factor(void);
+    extern uchar full_game_3d;
     gr2ss_override = OVERRIDE_ALL;
-    ss_set_hack_mode(2, &temp);
+    // Fullscreen: draw at the uniform HUD scale, exactly like
+    // make_popup_cursor() and the in-game cursor, so the page cursor isn't
+    // stuck at the raw SCONV (640x400 hack-mode) scale. Non-fullscreen keeps
+    // the stock hack-mode scale.
+    saved_cx = convert_x[convert_type][convert_use_mode];
+    saved_cy = convert_y[convert_type][convert_use_mode];
+    if (full_game_3d) {
+        fix kf = (fix)(hud_scale_factor() * 65536.0f);
+        convert_x[convert_type][convert_use_mode] = kf;
+        convert_y[convert_type][convert_use_mode] = kf;
+    } else {
+        ss_set_hack_mode(2, &temp);
+    }
 #endif
 
     gr_font_char_size(ResGet(EMAIL_CURS_FONT), 'X', &w, &h);
@@ -180,7 +218,12 @@ void make_email_cursor(LGCursor *c, grs_bitmap *bm, uchar page, bool init) {
     uiMakeBitmapCursor(c, bm, p);
     MouseLock--;
 #ifdef SVGA_SUPPORT
-    ss_set_hack_mode(0, &temp);
+    if (full_game_3d) {
+        convert_x[convert_type][convert_use_mode] = saved_cx;
+        convert_y[convert_type][convert_use_mode] = saved_cy;
+    } else {
+        ss_set_hack_mode(0, &temp);
+    }
     gr2ss_override = old_over;
 #endif
 }

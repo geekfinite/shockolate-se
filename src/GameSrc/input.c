@@ -3343,10 +3343,23 @@ void push_cursor_object(short obj) {
 #ifdef SVGA_SUPPORT
     if (convert_use_mode != 0) {
         grs_canvas temp_canv;
+        extern float hud_scale_factor(void);
+	extern uchar full_game_3d;
+        float k = full_game_3d ? hud_scale_factor() : 1.0f;
+        int cw, ch;
+        if (full_game_3d) {
+            cw = (int)(bmp->w * k + 0.5f);
+            ch = (int)(bmp->h * k + 0.5f);
+        } else {
+            cw = MODE_SCONV_X(bmp->w, 2);
+            ch = MODE_SCONV_Y(bmp->h, 2);
+        }
+        if (cw > SVGA_CURSOR_WIDTH)  cw = SVGA_CURSOR_WIDTH;
+        if (ch > SVGA_CURSOR_HEIGHT) ch = SVGA_CURSOR_HEIGHT;
+        if (cw < 1) cw = 1;
+        if (ch < 1) ch = 1;
         // Get a new bigger bitmap
-        gr_init_bm(&svga_cursor_bmp, svga_cursor_bits, BMT_FLAT8, BMF_TRANS,
-                   lg_min(MODE_SCONV_X(bmp->w, 2), SVGA_CURSOR_WIDTH),
-                   lg_min(MODE_SCONV_Y(bmp->h, 2), SVGA_CURSOR_HEIGHT));
+        gr_init_bm(&svga_cursor_bmp, svga_cursor_bits, BMT_FLAT8, BMF_TRANS, cw, ch);
         gr_make_canvas(&svga_cursor_bmp, &temp_canv);
 
         // Draw into it

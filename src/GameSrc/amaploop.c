@@ -48,6 +48,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "player.h"
 #include "rcolors.h"
 #include "wares.h"
+#include "cit2d.h"
 
 // octant-wise, that is...
 #define NORTH 0
@@ -57,9 +58,34 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 // room for a message line on the bottom of the screen...
 
-#define AMAP_BUTTON_WIDTH 92
-#define AMAP_HEADER_HGT 11
-#define AMAP_BORDER 4
+//Un-hardcoding values by recalculating them to follow
+// the original game layout at 640x480 --geekfinite
+
+// --- design reference ------------------------------------------------------
+// The automap layout (margins, header strip, button column) was originally
+// authored for a 640x480 canvas. Scale those fixed dimensions with the
+// canvas so the layout stays visually consistent at any resolution.
+#define AMAP_DESIGN_HEIGHT 480
+
+
+// The automap layout was authored for a 640-wide canvas; AMAP_BORDER = 4
+// there is 0.625% of the width. Scale by the width so the on-screen margin
+// keeps the same proportion at any resolution.
+#define AMAP_DESIGN_WIDTH 640
+
+
+
+// #define AMAP_BUTTON_WIDTH 92
+#define AMAP_BUTTON_WIDTH (grd_bm.w / 6)
+// #define AMAP_HEADER_HGT 11
+// #define AMAP_HEADER_HGT (grd_bm.h / 36)
+
+#define AMAP_HEADER_HGT   ((11 * grd_bm.w + AMAP_DESIGN_WIDTH / 2) / AMAP_DESIGN_WIDTH)
+// #define AMAP_BORDER 4
+
+static int amap_border = 4;             // fallback until fsmap_startup runs
+#define AMAP_BORDER (amap_border)
+
 #define AMAP_TOP(h) (AMAP_HEADER_HGT + AMAP_BORDER)
 #define AMAP_LFT(w) (AMAP_BORDER)
 #define AMAP_BOT(h) (h - 1 - AMAP_BORDER - AMAP_HEADER_HGT)
@@ -166,6 +192,16 @@ void btn_init(curAMap *amptr);
 // and he pull out True Love
 
 void fsmap_startup(void) {
+    gr_set_canvas(FULLMAP_CANVAS);
+    gr_clear(0xff);
+
+    // Freeze the border at the actual canvas size. Averaging the two axis
+    // ratios keeps it proportional on ultra-wide and ultra-tall screens:
+    // the 640x480 design gives 4/640 of the width plus 4/480 of the height,
+    // averaged.
+    amap_border = grd_bm.w / 320 + grd_bm.h / 240;
+    if (amap_border < 4) amap_border = 4;   // never shrink below the design value
+
     int i, n = 0, f, b, todo;
     grs_font *fsmap_font;
 
@@ -183,14 +219,22 @@ void fsmap_startup(void) {
     if ((n == 0) || (oAMap(MFD_FULLSCR_MAP)->flags == 0))
         oAMap(MFD_FULLSCR_MAP)->flags = f;
 
-    // Get the graphics system setup for fullscreen drawing.
+    // Get the graphics system setup for fullscreen drawing. Release any context
+    // left from a previous open first: it would otherwise keep a canvas pointing
+    // into the previous (now freed) offscreen surface after a resolution change.
+    if (full_map_context != NULL) {
+        fr_free_view(full_map_context);
+        full_map_context = NULL;
+    }
     full_map_context =
         fr_place_view(FR_NEWVIEW, FR_DEFCAM, offscreenDrawSurface->pixels, FR_DOUBLEB_MASK | FR_WINDOWD_MASK, 0, 0, 0,
                       0, grd_screen_canvas->bm.w, grd_screen_canvas->bm.h);
     gr_set_canvas(FULLMAP_CANVAS);
     gr_clear(0xff);
     amap_pixratio_set(FIX_UNIT);
-    fsmap_font = (grs_font *)ResLock(RES_largeTechFont); // KLC - was RES_mfdFont
+    fsmap_font = (grs_font *)ResLock(RES_mfdFont); // KLC - was RES_mfdFont
+                                                    // was RES_largeTechFont - back to RES_mfdFont
+                                                    // cause the other's TOO HUGE for proper scaling --geekfinite
     gr_set_font(fsmap_font);
     gr_init_sub_canvas(FULLMAP_CANVAS, &fsmap_actual, AMAP_LFT(grd_bm.w), AMAP_TOP(grd_bm.h), AMAP_WID(grd_bm.w),
                        AMAP_HGT(grd_bm.h));
@@ -224,8 +268,18 @@ void fsmap_free(void) {
         oAMap(i)->flags = oAMap(MFD_FULLSCR_MAP)->flags;
         oAMap(i)->flags |= AMAP_TRACK_OBJ;
     }
-    ResUnlock(RES_largeTechFont); // KLC - was RES_mfdFont
+    // fsmap_startup() locks RES_mfdFont for the map, so unlock the SAME one --
+    // the old mismatch left the resource ref-count unbalanced, which bites after
+    // a mode change / rescan (crash on the next automap open).
+    ResUnlock(RES_mfdFont);
     gr_set_canvas(grd_screen_canvas);
+    // The view context is re-created by fsmap_startup(); drop the old one here
+    // too so it cannot be left dangling over a freed offscreen surface when the
+    // resolution changes while the map is closed.
+    if (full_map_context != NULL) {
+        fr_free_view(full_map_context);
+        full_map_context = NULL;
+    }
 }
 
 void trail_sp_punt(void) {
@@ -256,8 +310,8 @@ void fsmap_button_redraw(void) {
         gr_set_fcolor(bcolor[0]);
         ss_box(AMAP_BORDER, GET_BTN_TOP(i), grd_bm.w - AMAP_BORDER + 3, GET_BTN_BOT(i));
         gr_set_fcolor(bcolor[cb & 3]);
-        ss_string(get_string(AMAP_BUTTON_BASE + i, button_buf, BUTTON_BUF_SIZE), 2 * AMAP_BORDER,
-                  GET_BTN_TOP(i) + AMAP_BORDER + 10);
+        ss_isotropic_string(get_string(AMAP_BUTTON_BASE + i, button_buf, BUTTON_BUF_SIZE), 2 * AMAP_BORDER,
+                  GET_BTN_TOP(i) + cur_btn_hgt / 3);
     }
 
     i = BOTTOM_BUTTONS_INDEX;
@@ -276,17 +330,17 @@ void fsmap_button_redraw(void) {
 
     ss_int_line(cx, cy, cx + bsx - 1, cy + bsy - 1);
     ss_int_line(cx + bsx - 1, cy, cx, cy + bsy - 1);
-    ss_string(get_temp_string(REF_STR_DirectionAbbrev + NORTH), cx + (bsx >> 1) - 3, cy + (bsy >> 2) - 3);
-    ss_string(get_temp_string(REF_STR_DirectionAbbrev + EAST), cx + (bsx >> 1) + (bsx >> 2) - 2 + AMAP_BORDER,
+    ss_isotropic_string(get_temp_string(REF_STR_DirectionAbbrev + NORTH), cx + (bsx >> 1) - 3, cy + (bsy >> 2) - 3);
+    ss_isotropic_string(get_temp_string(REF_STR_DirectionAbbrev + EAST), cx + (bsx >> 1) + (bsx >> 2) - 2 + AMAP_BORDER,
               cy + (bsy >> 1) - 3);
-    ss_string(get_temp_string(REF_STR_DirectionAbbrev + SOUTH), cx + (bsx >> 1) - 3, cy + bsy - (bsy >> 2) - 3);
-    gr_string(get_temp_string(REF_STR_DirectionAbbrev + WEST), cx + (bsx >> 3) - 2 + AMAP_BORDER, cy + (bsy >> 1) - 3);
+    ss_isotropic_string(get_temp_string(REF_STR_DirectionAbbrev + SOUTH), cx + (bsx >> 1) - 3, cy + bsy - (bsy >> 2) - 3);
+    ss_isotropic_string(get_temp_string(REF_STR_DirectionAbbrev + WEST), cx + (bsx >> 3) - 2 + AMAP_BORDER, cy + (bsy >> 1) - 3);
 
     // done button
     ss_box(AMAP_BORDER, grd_bm.h - BTN_HGT_MUL, grd_bm.w - AMAP_BORDER + 3, grd_bm.h);
     gr_set_fcolor(bcolor[cb & 3]);
-    ss_string(get_string(AMAP_BUTTON_BASE + i, button_buf, BUTTON_BUF_SIZE), 2 * AMAP_BORDER,
-              (grd_bm.h) - BTN_HGT_MUL + AMAP_BORDER + 12);
+    ss_isotropic_string(get_string(AMAP_BUTTON_BASE + i, button_buf, BUTTON_BUF_SIZE), 2 * AMAP_BORDER,
+              (grd_bm.h) - BTN_HGT_MUL + cur_btn_hgt / 3 + 2);
 
     gr_pop_canvas();
     chg_unset_flg(AMAP_BUTTON_EV);
@@ -313,9 +367,9 @@ void fsmap_interface_draw(void) {
     ss_box(AMAP_LFT(grd_bm.w) - 1, AMAP_TOP(grd_bm.h) - 1, AMAP_RGT(grd_bm.w) + 1, AMAP_BOT(grd_bm.h) + 1);
 
     gr_set_fcolor(RED_8_BASE);
-    ss_string(get_string(TRIOP_STRING_BASE, buf, TRIOP_BUF_SIZE), AMAP_LFT(grd_bm.w), AMAP_BORDER);
+    ss_isotropic_string(get_string(TRIOP_STRING_BASE, buf, TRIOP_BUF_SIZE), AMAP_LFT(grd_bm.w), AMAP_BORDER);
 
-    ss_string(fsmap_get_lev_str(buf, TRIOP_BUF_SIZE), AMAP_RGT(grd_bm.w) + 2 * AMAP_BORDER, AMAP_BORDER);
+    ss_isotropic_string(fsmap_get_lev_str(buf, TRIOP_BUF_SIZE), AMAP_RGT(grd_bm.w) + 2 * AMAP_BORDER, AMAP_BORDER);
 
     chg_unset_flg(AMAP_FULLEXPOSE);
 }
@@ -338,15 +392,15 @@ void fsmap_message_redraw(void) {
             gr_set_fcolor(RED_8_BASE + 2);
             strcpy(buf, "> ");
             gr_string_size(buf, &w, &dummy);
-            ss_string(buf, x, y);
-            ss_string(buf, x + 1, y);
+            ss_isotropic_string(buf, x, y);
+            ss_isotropic_string(buf, x + 1, y);
             x += w + 1;
         }
         amap_get_note(oAMap(MFD_FULLSCR_MAP), buf);
-        ss_string(buf, x, y); // +1 to get out of box, 2 for pad?
+        ss_isotropic_string(buf, x, y); // +1 to get out of box, 2 for pad?
     } else {
         gr_set_fcolor(RED_8_BASE + 4);
-        ss_string(get_string(REF_STR_NoMessage, buf2, MSG_BUF2_SIZE), AMAP_LFT(grd_bm.w), AMAP_BOT(grd_bm.h) + 1 + 2);
+        ss_isotropic_string(get_string(REF_STR_NoMessage, buf2, MSG_BUF2_SIZE), AMAP_LFT(grd_bm.w), AMAP_BOT(grd_bm.h) + 1 + 2);
     }
     if (cur_mapnote_base != NULL) {
         gr_set_fcolor(PULSE_RED);
@@ -609,28 +663,78 @@ uchar amap_ms_callback(curAMap *amptr, int x, int y, short action, ubyte b) {
                 hack_kb_callback(amptr, DO_QUIT);
         }
 
+        // else // Else we must be in the pan region
+        // {
+        //     x -= AMAP_RGT(grd_bm.w) + 2 * AMAP_BORDER + 1; // normalize to middle of pan region
+        //     x -= 38;
+        //     x *= 5;
+        //     y -= GET_BTN_TOP(7);
+        //     y -= 90;
+        //     y *= 2;
+        //
+        //     if ((abs(abs(x) - abs(y))) < 3)
+        //         return TRUE;     // null pan area...
+        //     if (abs(x) > abs(y)) // ew
+        //         if (x > 0)
+        //             map_scroll_code = AMAP_PAN_E;
+        //         else
+        //             map_scroll_code = AMAP_PAN_W;
+        //     else if (y > 0)
+        //         map_scroll_code = AMAP_PAN_S;
+        //     else
+        //         map_scroll_code = AMAP_PAN_N;
+        //     map_scroll_clicked = TRUE;
+        // }
         else // Else we must be in the pan region
         {
-            x -= AMAP_RGT(grd_bm.w) + 2 * AMAP_BORDER + 1; // normalize to middle of pan region
-            x -= 38;
-            x *= 5;
-            y -= GET_BTN_TOP(7);
-            y -= 90;
-            y *= 2;
+            // Convert click x to fsmap_bregion's local frame; y was already
+            // adjusted by -AMAP_TOP above.
+            int lx = x - (AMAP_RGT(grd_bm.w) + AMAP_BORDER);
+            int ly = y;
 
-            if ((abs(abs(x) - abs(y))) < 3)
-                return TRUE;     // null pan area...
-            if (abs(x) > abs(y)) // ew
-                if (x > 0)
-                    map_scroll_code = AMAP_PAN_E;
-                else
-                    map_scroll_code = AMAP_PAN_W;
-            else if (y > 0)
-                map_scroll_code = AMAP_PAN_S;
-            else
-                map_scroll_code = AMAP_PAN_N;
-            map_scroll_clicked = TRUE;
+            // Pan box bounds in local coords, matching fsmap_button_redraw():
+            //   cx = AMAP_BORDER + 1
+            //   cy = GET_BTN_TOP(BOTTOM_BUTTONS_INDEX)
+            //   right  = fsmap_bregion.w - AMAP_BORDER + 3
+            //   bottom = fsmap_bregion.h - BTN_HGT_MUL - AMAP_BORDER
+            // where fsmap_bregion.w = AMAP_BUTTON_WIDTH - 2*AMAP_BORDER and
+            //       fsmap_bregion.h = AMAP_HGT(grd_bm.h).
+            int sub_w = AMAP_BUTTON_WIDTH - 2 * AMAP_BORDER;
+            int sub_h = AMAP_HGT(grd_bm.h);
+            int box_l = AMAP_BORDER + 1;
+            int box_r = sub_w - AMAP_BORDER + 3;
+            int box_t = GET_BTN_TOP(BOTTOM_BUTTONS_INDEX);
+            int box_b = sub_h - BTN_HGT_MUL - AMAP_BORDER;
+
+            int cx = (box_l + box_r) / 2;
+            int cy = (box_t + box_b) / 2;
+            int hw = (box_r - box_l) / 2; if (hw < 1) hw = 1;
+            int hh = (box_b - box_t) / 2; if (hh < 1) hh = 1;
+
+            // Normalize to [-100, +100] across the box, then apply the same 5:2
+            // aspect correction the original used. Both normalization and aspect
+            // factor now track the box size, so the four direction regions stay
+            // visually identical at any resolution.
+            int nx = ((lx - cx) * 100 / hw) * 5;
+            int ny = ((ly - cy) * 100 / hh) * 2;
+
+            // Dead zone: a thin band along the diagonals. Original was 3 in a
+            // post-scaled frame where the half-extent was ~190 (x) / ~110 (y);
+            // use a value scaled to that same ratio.
+            int tol = 15;
+            if (abs(abs(nx) - abs(ny)) < tol)
+                return TRUE; // null pan area
+
+                if (abs(nx) > abs(ny)) {
+                    if (nx > 0) map_scroll_code = AMAP_PAN_E;
+                    else        map_scroll_code = AMAP_PAN_W;
+                } else {
+                    if (ny > 0) map_scroll_code = AMAP_PAN_S;
+                    else        map_scroll_code = AMAP_PAN_N;
+                }
+                map_scroll_clicked = TRUE;
         }
+
     } else {
         void *deal_data;
         ObjID prev_note;

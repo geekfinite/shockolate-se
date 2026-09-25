@@ -647,6 +647,9 @@ void games_expose_pong(MFD *m, ubyte control) {
         for (; games_time_diff >= PONG_CYCLE; games_time_diff -= PONG_CYCLE) {
             games_run_pong(cur_ps);
             ui_mouse_get_xy(&fake_event.pos.x, &fake_event.pos.y);
+            // Same coordinate space as a real region event (see
+            // mfd_view_event_to_canvas): the handler works in canvas coords.
+            mfd_view_event_to_canvas(m, &fake_event);
             games_handle_pong(m, &fake_event);
             if (score_time > 0 || cur_ps->game_won)
                 break;
@@ -697,8 +700,14 @@ uchar games_handle_pong(MFD *m, uiEvent *e) {
     pong_state *cur_ps = (pong_state *)GAME_DATA;
     LGPoint pos = MakePoint(e->pos.x - m->rect.ul.x, e->pos.y - m->rect.ul.y);
     ubyte spd = lg_min(3, abs(pos.x - cur_ps->p_pos) / PLY_PADDLE_XRAD + 1);
-    if (pos.x + PONG_FUDGE < 0 || pos.y + PONG_FUDGE < 0 || pos.x >= RectWidth(&m->rect) + PONG_FUDGE ||
-        pos.y >= RectHeight(&m->rect) + PONG_FUDGE) {
+    // Bound by the view CANVAS (74x58), not m->rect: in fullscreen m->rect is
+    // the drawn view's *logical* rect (e.g. 25x22 at 1920x1080 / scale 200)
+    // while the handler works in canvas space, so the old bounds accepted only
+    // the canvas' top-left corner (the game looked like a left-edge strip, and
+    // most clicks did nothing). In non-fullscreen m->rect is already 74x58, so
+    // this is a no-op there.
+    if (pos.x + PONG_FUDGE < 0 || pos.y + PONG_FUDGE < 0 || pos.x >= MFD_VIEW_WID + PONG_FUDGE ||
+        pos.y >= MFD_VIEW_HGT + PONG_FUDGE) {
         cur_ps->p_spd = 0;
         return TRUE;
     }

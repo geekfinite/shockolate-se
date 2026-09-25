@@ -207,14 +207,20 @@ int32_t AfileReadFullFrame(Afile *paf, grs_bitmap *pbm, fix *ptime) {
     TRACE("%s: adding to compose buffer", __FUNCTION__);
     ComposeAdd(&paf->bmCompose, &paf->bmWork);
 
-    // Make sure bitmap has memory
-    if (pbm->bits == NULL) {
-        TRACE("%s: mallocing bitmap", __FUNCTION__);
-        pbm->bits = (uchar *)malloc(paf->frameLen);
-        if (pbm->bits == NULL) {
+    // Make sure bitmap has memory -- AND enough of it. This bitmap is reused
+    // across cutscenes, and consecutive movies can have different frame sizes
+    // (the low-res 320x200 movies vs the hi-res 600x300 ones). The old code
+    // only allocated when bits == NULL, so a larger movie decoded into a
+    // smaller previous buffer and overran it, corrupting the heap (which is how
+    // the 4x4 decoder kept faulting later in unrelated table/mask reads).
+    if (pbm->bits == NULL || (int32_t)pbm->w * (int32_t)pbm->h < paf->frameLen) {
+        TRACE("%s: (re)allocating bitmap for %d bytes", __FUNCTION__, paf->frameLen);
+        uint8_t *nb = (uint8_t *)realloc(pbm->bits, paf->frameLen);
+        if (nb == NULL) {
             ERROR("%s: can't find memory for bitmap", __FUNCTION__);
             return -1;
         }
+        pbm->bits = nb;
     }
 
     // Copy current compose buffer to caller

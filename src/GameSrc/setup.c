@@ -1321,6 +1321,11 @@ void splash_draw(bool show_splash) {
     // clear the screen
     gr_clear(0);
 
+    // Keep the splash/title art at correct 4:3 proportions on widescreen:
+    // confine the 320x200 logical space to a centred 4:3 rect (black bars on
+    // the sides), rather than stretching it to fill the framebuffer.
+    ss_bounds_begin(4.0f / 3.0f);
+
     HotkeyContext = SETUP_CONTEXT;
     uiSetCurrentSlab(&setup_slab);
 
@@ -1357,6 +1362,7 @@ void splash_draw(bool show_splash) {
 
     // Original palette
     gr_set_pal(0, 256, ppall);
+    ss_bounds_end();
 }
 
 void setup_loop(void) {
@@ -1380,6 +1386,10 @@ void setup_loop(void) {
 
     last_setup_mode = setup_mode;
 
+    // Main menu always renders at 4:3 on widescreen (same bounding box as the
+    // splash screens): centre the 320x200 menu art instead of stretching it.
+    ss_bounds_begin(4.0f / 3.0f);
+
     switch (setup_mode) {
     case SETUP_DIFFICULTY:
         difficulty_draw(draw_stuff);
@@ -1394,6 +1404,8 @@ void setup_loop(void) {
         journey_credits_func(draw_stuff);
         break;
     }
+
+    ss_bounds_end();
 }
 
 // if these don't get reset, sticky residue of any old game sticks around
@@ -1502,6 +1514,8 @@ void setup_start(void) {
         uiShowMouse(NULL);
     } else if (!play_intro_anim) {
         uiShowMouse(NULL);
+        // Main menu art stays 4:3 on widescreen.
+        ss_bounds_begin(4.0f / 3.0f);
         switch (setup_mode) {
         case SETUP_DIFFICULTY:
             difficulty_draw(TRUE);
@@ -1512,6 +1526,7 @@ void setup_start(void) {
         default:
             break;
         }
+        ss_bounds_end();
         direct_into_cutscene = FALSE;
     } else {
         direct_into_cutscene = TRUE;

@@ -212,8 +212,55 @@ NEXT_CHUNK:
         if (pbm->type == MOVIE_FVIDEO_BMF_4X4) {
             mfseek(paf->mf, pmi->pcurrChunk->offset);
             len = MovieChunkLength(pmi->pcurrChunk);
-            p = (uint8_t *)malloc(len);
-            mfread(p, len, paf->mf);
+            // Guard the chunk before decoding. mfread() clamps to the end of the
+            // in-memory movie, so a stale/oversized chunk entry (or a truncated
+            // movie) silently yields a SHORT read: the tail of the buffer stays
+            // uninitialised garbage, the frame's uint16 mask-stream offset is
+            // then garbage, and Draw4x4 walks off the buffer (SIGSEGV -- seen at
+            // ultrawide modes when the window was being moved). Skip the frame
+            // instead of decoding garbage.
+            if (len <= 4 || (uint32_t)len > (uint32_t)paf->mf->size ||
+                pmi->pcurrChunk->offset > (uint32_t)paf->mf->size - (uint32_t)len) {
+                ERROR("%s: bad 4x4 chunk (off=%u len=%d of %d) -- skipping frame", __FUNCTION__,
+                      (unsigned)pmi->pcurrChunk->offset, len, paf->mf->size);
+                pmi->pcurrChunk++;
+                *ptime = 0;
+                return (len > 0 ? len : 0);
+            }
+            // The 4x4 decoder walks its mask stream through this buffer and can
+            // read a few bytes past the frame's last mask word (the masks end
+            // on the final cell). gdb showed the mask pointer reaching the very
+            // end of the allocation and faulting on the next page at ultrawide
+            // modes -- the frame data itself is fine (the checks above pass).
+            // Give the buffer a small zeroed pad, exactly like the decoder
+            // work buffer gets in afile.c (BM_PLENTY_SIZE + canary): a borderline
+            // frame then decodes a slightly wrong last tile instead of crashing.
+            p = (uint8_t *)malloc(len + 64);
+            if (p == NULL) {
+                ERROR("%s: out of memory for %d-byte frame", __FUNCTION__, len);
+                pmi->pcurrChunk++;
+                *ptime = 0;
+                return (len);
+            }
+            memset(p + len, 0, 64);
+            if (mfread(p, len, paf->mf) != len) {
+                ERROR("%s: short read of 4x4 frame (%d bytes at %u) -- skipping frame", __FUNCTION__, len,
+                      (unsigned)pmi->pcurrChunk->offset);
+                free(p);
+                pmi->pcurrChunk++;
+                *ptime = 0;
+                return (len);
+            }
+            // The frame header starts with a uint16 offset to the mask stream;
+            // a wild value would send Draw4x4 off the end of this buffer.
+            if ((uint32_t)*(uint16_t *)p >= (uint32_t)len) {
+                ERROR("%s: bad 4x4 mask offset %u (len %d) -- skipping frame", __FUNCTION__,
+                      (unsigned)*(uint16_t *)p, len);
+                free(p);
+                pmi->pcurrChunk++;
+                *ptime = 0;
+                return (len);
+            }
             pbm->type = BMT_FLAT8;
             // Hi-res movie frames should not be transparent: the 4x4 codec
             // makes its own arrangements for transparency, and at least 1
@@ -240,21 +287,34 @@ NEXT_CHUNK:
         case MOVIE_FTABLE_COLORSET:
             if (pColorSet)
                 free(pColorSet);
-            pColorSet = (uint8_t *)malloc(MovieChunkLength(pmi->pcurrChunk));
+            // +16 zeroed pad: the decoder indexes these tables with values taken
+            // from the compressed stream and can read a few bytes past the last
+            // entry (see the hufftab case below).
+            pColorSet = (uint8_t *)malloc(MovieChunkLength(pmi->pcurrChunk) + 16);
+            memset(pColorSet + MovieChunkLength(pmi->pcurrChunk), 0, 16);
             mfread(pColorSet, MovieChunkLength(pmi->pcurrChunk), paf->mf);
             break;
 
         case MOVIE_FTABLE_HUFFTAB: {
             uint32_t len, *pl;
-            pHuffTabComp = (uint8_t *)malloc(MovieChunkLength(pmi->pcurrChunk));
+            // Both tables get a +16 zeroed pad. The Huffman table holds 3-byte
+            // tokens but the decoder reads a uint32 at each index, so the last
+            // entry's read sticks 1-2 bytes past the end; a 4096-entry table is
+            // exactly 3 pages, so malloc can return a page-aligned block and that
+            // read then faults (SIGSEGV in Draw4x4_InternalAlpha). HuffExpand-
+            // FlashTables() also walks the compressed table token by token, so
+            // its source needs the same slack.
+            pHuffTabComp = (uint8_t *)malloc(MovieChunkLength(pmi->pcurrChunk) + 16);
+            memset(pHuffTabComp + MovieChunkLength(pmi->pcurrChunk), 0, 16);
             mfread(pHuffTabComp, MovieChunkLength(pmi->pcurrChunk), paf->mf);
             pl = (uint32_t *)pHuffTabComp;
             len = *pl++;
             if (pHuffTab)
                 free(pHuffTab);
-            pHuffTab = (uint8_t *)malloc(len);
+            pHuffTab = (uint8_t *)malloc(len + 16);
+            memset(pHuffTab + len, 0, 16);
             HuffExpandFlashTables(pHuffTab, len, pl, 3);
-            Draw4x4Reset(pColorSet, pHuffTab);
+            Draw4x4Reset(pColorSet, pHuffTab, len);
             free(pHuffTabComp);
         } break;
         }

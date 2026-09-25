@@ -57,7 +57,12 @@ grs_mode_info grd_mode_info[GRD_MODES] = {
    {  640,  480, 24 },
    {  800,  600, 24 },
    { 1024,  768, 24 },
-   { 1280, 1024, 24 }
+   { 1280, 1024, 24 },
+   {  854,  480, 24 },  // 16:9 widescreen, same height as 640x480
+   { 1366,  768, 24 },  // 16:9 widescreen, same height as 1024x768
+   { 1920, 1080, 24 }, // 16:9 widescreen, native 1080p
+   { 1280,  720, 24 }, // 16:9 widescreen, 720p
+   { 1600,  900, 24 }  // 16:9 widescreen, 900p
 };
 
 // code from SMODE.ASM

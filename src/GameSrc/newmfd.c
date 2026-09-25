@@ -55,8 +55,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "popups.h"
 #include "statics.h"
 #include "gr2ss.h"
-
+#include "Prefs.h"
 #include "cybstrng.h"
+
+#include "leanmetr.h"
+#include "sideicon.h"
+#include "status.h"
 
 // -----------------------
 // Player_Struct Accessors
@@ -87,6 +91,742 @@ grs_canvas _offscreen_mfd, _fullscreen_mfd;
 grs_bitmap mfd_background;
 grs_canvas *pmfd_canvas;
 
+
+// =========================================================================
+// HUD overlay module
+//
+// Elements register a native canvas, a corner/edge anchor, and a draw
+// callback. At layout time, each element is given a real-pixel destination
+// rect computed from its anchor and the global HUD scale. Drawing pushes
+// the element's canvas, calls its draw callback, pops, and then blits the
+// canvas to the framebuffer with gr_scale_bitmap — bypassing the outer SS
+// scaler entirely, which is what makes the HUD aspect-correct.
+// =========================================================================
+
+#define HUD_ANCHOR_TL 0
+#define HUD_ANCHOR_TR 1
+#define HUD_ANCHOR_BL 2
+#define HUD_ANCHOR_BR 3
+#define HUD_ANCHOR_T  4  // top-center
+#define HUD_ANCHOR_B  5  // bottom-center
+#define HUD_ANCHOR_L  6  // left-middle
+#define HUD_ANCHOR_R  7  // right-middle
+
+typedef struct {
+    const char *name;
+    grs_canvas *canvas;       // native-size canvas to draw into
+    int src_w, src_h;         // native size (pixels of the canvas)
+    int anchor;
+    int margin_x, margin_y;   // px of margin from anchored edge, in *real* pixels
+    // Filled at layout time:
+    int dst_x, dst_y, dst_w, dst_h;
+    LGRegion *region;         // real-pixel region; may be NULL if no input
+} hud_element;
+
+#define HUD_MAX_ELEMENTS 16
+static hud_element hud_elements[HUD_MAX_ELEMENTS];
+static int hud_num_elements = 0;
+
+// Global HUD scale (percent). 100 == native pixel size. This is the single
+// user preference that sizes the whole fullscreen HUD -- MFD panels, vitals,
+// inventory and the lean meter -- and is stored as gShockPrefs.hudScale.
+// Only fullscreen code paths consult it (every caller sits inside a
+// full_game_3d / fullscreen branch), so non-fullscreen rendering is untouched.
+short hud_scale_pct = 100;
+
+// Range of the user-facing setting. The floor sits above the smallest HUD
+// font tier on purpose: below it the scaled-down fonts stop being legible, so
+// 60..150 maps onto the "double" (floor) and "mega" tiers.
+#define HUD_SCALE_MIN 100
+#define HUD_SCALE_MAX 1000
+
+// The HUD scales in INTEGER tiers only (1x .. 10x). A fractional factor makes
+// the pixel art (HUD art, arrows and the weapon sprite) land on uneven pixel
+// sizes, so snap the requested percentage to the nearest whole tier.
+short hud_scale_clamp(short pct) {
+    int tier = ((int)pct + 50) / 100; // nearest whole multiple of 100
+    if (tier < HUD_SCALE_MIN / 100)
+        tier = HUD_SCALE_MIN / 100;
+    if (tier > HUD_SCALE_MAX / 100)
+        tier = HUD_SCALE_MAX / 100;
+    return (short)(tier * 100);
+}
+
+// Factor applied to every fullscreen HUD element's size. Callers multiply
+// their existing fullscreen scale by this and then re-derive their position
+// from their UNCHANGED anchor -- so an element that hugs a corner stays in
+// that corner and grows about it, and centred elements stay centred.
+float hud_scale_factor(void) {
+    short p = gShockPrefs.hudScale ? gShockPrefs.hudScale : 100;
+    return (float)hud_scale_clamp(p) / 100.0f;
+}
+
+// ---------------------------------------------------------------------------
+// HUD bounds
+//
+// Optionally confines the *edge-anchored* fullscreen HUD elements (the two MFD
+// units with their button strips, the side icon columns, the vitals readout)
+// to a horizontally centred rect of a given aspect ratio instead of the full
+// framebuffer width. E.g. on a 21:9 monitor, "4:3" pulls all of them back
+// into the classic 4:3 layout in the middle of the screen while the 3D view
+// still fills the whole window.
+//
+// Elements that are already horizontally centred (inventory, message line,
+// lean meter) need no change: the bounded rect shares the screen's centre.
+//
+// Settings live in gShockPrefs.hudBoundMode / hudBoundCustomW / hudBoundCustomH.
+// With mode OFF (the default) hud_bounds_insets() returns 0/0, so every caller
+// lays out exactly as it did before this module existed.
+// ---------------------------------------------------------------------------
+#include <ctype.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define HUD_BOUND_OFF    0
+#define HUD_BOUND_4_3    1
+#define HUD_BOUND_16_9   2
+#define HUD_BOUND_CUSTOM 3
+
+// Accepted range for a custom ratio (width / height).
+#define HUD_BOUND_RATIO_MIN 1.0f
+#define HUD_BOUND_RATIO_MAX 4.0f
+
+extern short mode_id; // fullscrn.c: the selected screen-mode slot
+
+// Target aspect (width / height) for the current setting; 0 when bounding is off.
+static float hud_bound_ratio(void) {
+    switch (gShockPrefs.hudBoundMode) {
+    case HUD_BOUND_4_3:
+        return 4.0f / 3.0f;
+    case HUD_BOUND_16_9:
+        return 16.0f / 9.0f;
+    case HUD_BOUND_CUSTOM:
+        if (gShockPrefs.hudBoundCustomW > 0 && gShockPrefs.hudBoundCustomH > 0) {
+            float ratio = (float)gShockPrefs.hudBoundCustomW / (float)gShockPrefs.hudBoundCustomH;
+            if (ratio < HUD_BOUND_RATIO_MIN)
+                ratio = HUD_BOUND_RATIO_MIN;
+            if (ratio > HUD_BOUND_RATIO_MAX)
+                ratio = HUD_BOUND_RATIO_MAX;
+            return ratio;
+        }
+        return 0.0f;
+    default:
+        return 0.0f;
+    }
+}
+
+// Real-pixel distance from the left / right screen edge to the bounded rect.
+// Both are 0 when bounding is off, when the screen is already no wider than
+// the target aspect, and on the legacy 4:3 slots (mode_id < 8). mode_id is
+// used rather than convert_use_mode because the latter is temporarily forced
+// by ss_set_hack_mode() while the HUD layout is being recomputed.
+void hud_bounds_insets(int *left, int *right) {
+    int l = 0, r = 0;
+    float ratio = hud_bound_ratio();
+
+    if (ratio > 0.0f && mode_id >= 8 && grd_cap != NULL && grd_cap->h > 0) {
+        int sw = grd_cap->w;
+        int bw = (int)((float)grd_cap->h * ratio + 0.5f);
+        // Ignore a 1px sliver from rounding (e.g. 854x480 vs 16:9).
+        if (bw > 0 && sw - bw > 1) {
+            l = (sw - bw) / 2;
+            r = sw - bw - l;
+        }
+    }
+    if (left)
+        *left = l;
+    if (right)
+        *right = r;
+}
+
+static int hud_bound_ieq(const char *a, const char *b) {
+    while (*a && *b) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b))
+            return 0;
+        a++;
+        b++;
+    }
+    return *a == *b;
+}
+
+// Parses a HUD-bounds value as used by the prefs file and the -hudbound
+// launch option:
+//   off | none | no | full | 0   -> mode OFF
+//   4:3 / 16:9                   -> the matching preset
+//   custom                       -> mode CUSTOM, keeps the stored custom ratio
+//   W:H (e.g. 21:9, 16:10)       -> preset if it equals 4:3 / 16:9, else CUSTOM
+//   decimal (e.g. 2.39)          -> CUSTOM, stored as (value * 100) : 100
+// Returns 0 if the text can't be parsed (outputs untouched), 1 for a keyword,
+// 2 for a ratio. On 2, *cw / *ch (if non-NULL) receive the parsed ratio even
+// when it matched a preset, so callers can decide whether to keep it.
+int hud_bounds_parse(const char *s, short *mode, short *cw, short *ch) {
+    char buf[32];
+    char *colon, *end;
+    size_t n;
+    long w, h;
+
+    if (s == NULL || mode == NULL)
+        return 0;
+    while (*s == ' ' || *s == '\t')
+        s++;
+    n = strlen(s);
+    while (n > 0 && isspace((unsigned char)s[n - 1]))
+        n--;
+    if (n == 0 || n >= sizeof(buf))
+        return 0;
+    memcpy(buf, s, n);
+    buf[n] = '\0';
+
+    if (hud_bound_ieq(buf, "off") || hud_bound_ieq(buf, "none") || hud_bound_ieq(buf, "no") ||
+        hud_bound_ieq(buf, "full") || hud_bound_ieq(buf, "0")) {
+        *mode = HUD_BOUND_OFF;
+        return 1;
+    }
+    if (hud_bound_ieq(buf, "custom")) {
+        *mode = HUD_BOUND_CUSTOM;
+        return 1;
+    }
+
+    colon = strchr(buf, ':');
+    if (colon != NULL) {
+        *colon = '\0';
+        w = strtol(buf, &end, 10);
+        if (end == buf || *end != '\0')
+            return 0;
+        h = strtol(colon + 1, &end, 10);
+        if (end == colon + 1 || *end != '\0')
+            return 0;
+    } else {
+        double v = strtod(buf, &end);
+        if (end == buf || *end != '\0' || v <= 0.0 || v > 100.0)
+            return 0;
+        w = (long)(v * 100.0 + 0.5);
+        h = 100;
+    }
+
+    if (w <= 0 || h <= 0 || w > 10000 || h > 10000)
+        return 0;
+    if ((float)w / (float)h < HUD_BOUND_RATIO_MIN || (float)w / (float)h > HUD_BOUND_RATIO_MAX)
+        return 0;
+
+    if (cw)
+        *cw = (short)w;
+    if (ch)
+        *ch = (short)h;
+    if (w * 3 == h * 4)
+        *mode = HUD_BOUND_4_3;
+    else if (w * 9 == h * 16)
+        *mode = HUD_BOUND_16_9;
+    else
+        *mode = HUD_BOUND_CUSTOM;
+    return 2;
+}
+
+// Register an element. Call before fullscreen entry.
+int hud_register(grs_canvas *canvas, int src_w, int src_h, int anchor,
+                 int margin_x, int margin_y, const char *name) {
+    if (hud_num_elements >= HUD_MAX_ELEMENTS) return -1;
+    hud_element *e = &hud_elements[hud_num_elements];
+    e->name = name;
+    e->canvas = canvas;
+    e->src_w = src_w;
+    e->src_h = src_h;
+    e->anchor = anchor;
+    e->margin_x = margin_x;
+    e->margin_y = margin_y;
+    e->dst_x = e->dst_y = e->dst_w = e->dst_h = 0;
+    e->region = NULL;
+    return hud_num_elements++;
+}
+
+// Compute destination rects for all elements based on the current
+// screen size and HUD scale. Does not move regions or redraw.
+void hud_layout(void) {
+    int sw = grd_cap->w;
+    int sh = grd_cap->h;
+    for (int i = 0; i < hud_num_elements; i++) {
+        hud_element *e = &hud_elements[i];
+        e->dst_w = e->src_w * hud_scale_pct / 100;
+        e->dst_h = e->src_h * hud_scale_pct / 100;
+        switch (e->anchor) {
+        case HUD_ANCHOR_TL:
+            e->dst_x = e->margin_x;
+            e->dst_y = e->margin_y;
+            break;
+        case HUD_ANCHOR_TR:
+            e->dst_x = sw - e->dst_w - e->margin_x;
+            e->dst_y = e->margin_y;
+            break;
+        case HUD_ANCHOR_BL:
+            e->dst_x = e->margin_x;
+            e->dst_y = sh - e->dst_h - e->margin_y;
+            break;
+        case HUD_ANCHOR_BR:
+            e->dst_x = sw - e->dst_w - e->margin_x;
+            e->dst_y = sh - e->dst_h - e->margin_y;
+            break;
+        case HUD_ANCHOR_T:
+            e->dst_x = (sw - e->dst_w) / 2 + e->margin_x;
+            e->dst_y = e->margin_y;
+            break;
+        case HUD_ANCHOR_B:
+            e->dst_x = (sw - e->dst_w) / 2 + e->margin_x;
+            e->dst_y = sh - e->dst_h - e->margin_y;
+            break;
+        case HUD_ANCHOR_L:
+            e->dst_x = e->margin_x;
+            e->dst_y = (sh - e->dst_h) / 2 + e->margin_y;
+            break;
+        case HUD_ANCHOR_R:
+            e->dst_x = sw - e->dst_w - e->margin_x;
+            e->dst_y = (sh - e->dst_h) / 2 + e->margin_y;
+            break;
+        }
+        // HUD bounds: left/right-anchored elements hug the bounded rect.
+        {
+            int bound_l, bound_r;
+            hud_bounds_insets(&bound_l, &bound_r);
+            switch (e->anchor) {
+            case HUD_ANCHOR_TL:
+            case HUD_ANCHOR_BL:
+            case HUD_ANCHOR_L:
+                e->dst_x += bound_l;
+                break;
+            case HUD_ANCHOR_TR:
+            case HUD_ANCHOR_BR:
+            case HUD_ANCHOR_R:
+                e->dst_x -= bound_r;
+                break;
+            }
+        }
+    }
+}
+
+// Blit all elements to the framebuffer. Called after the 3D view is
+// rendered, and again whenever a HUD element changes.
+//
+// Uses gr_scale_bitmap (not ss_scale_bitmap) so the outer SS scaler does
+// NOT touch the destination coordinates. That's what keeps the HUD
+// aspect-correct.
+void hud_redraw(void) {
+    gr_push_canvas(grd_screen_canvas);
+    uchar old_over = gr2ss_override;
+    gr2ss_override = OVERRIDE_NONE;   // belt and suspenders
+    for (int i = 0; i < hud_num_elements; i++) {
+        hud_element *e = &hud_elements[i];
+        gr_scale_bitmap(&e->canvas->bm, e->dst_x, e->dst_y, e->dst_w, e->dst_h);
+    }
+    gr2ss_override = old_over;
+    gr_pop_canvas();
+}
+
+// Convert a screen-space mouse event to canvas space for an element.
+// Handlers that live inside the element (like the MFD view callback)
+// should call this before doing hit tests.
+LGPoint hud_screen_to_canvas(hud_element *e, LGPoint screen) {
+    LGPoint p;
+    p.x = (screen.x - e->dst_x) * e->src_w / e->dst_w;
+    p.y = (screen.y - e->dst_y) * e->src_h / e->dst_h;
+    return p;
+}
+
+
+// ---------------------------------------------------------------------------
+// Fullscreen MFD geometry
+//
+// In fullscreen mode, fullview_region (the parent region for all fullscreen
+// overlays) is 320x200 logical (see fscrn_rect in screen.c).  Every fullscreen
+// overlay -- MFDs, inventory, side icons, wrapper cursor region -- lives in
+// that same 320x200 space, and the SS layer's SCONV_X/Y take the whole thing
+// up to the real framebuffer resolution.
+//
+// So "making the HUD bigger" means: make the MFD's *destination rect* bigger
+// within the 320x200 space, and stretch-blit the 74x58 MFD canvas into it.
+// The view-window content (automap, weapon display, etc.) is unchanged; only
+// the final blit is scaled.
+//
+// This struct holds the geometry for the fullscreen path.  The non-fullscreen
+// path continues to use the MFD_VIEW_* / MFD_BTTN_* constants from mfddims.h
+// verbatim, so the original 320x200 in-game HUD is pixel-for-pixel unchanged.
+//
+// The numbers here are in *logical* (320x200) space.  They are chosen so that
+// each MFD unit (view + button strip) occupies roughly 1/3 of the logical
+// width, with the two units hugging the left and right edges and a wide gap
+// between them -- which on a real widescreen resolution becomes a proportional
+// scale-up of the classic HUD layout.
+//
+// These are the knobs to tweak if the HUD feels too small/large on your
+// display.  Adjust and rebuild; nothing else in this file depends on the
+// specific values.
+
+typedef struct {
+    short view_lx, view_rx, view_y, view_w, view_h;   // view window rects
+    short bttn_lx, bttn_rx, bttn_y, bttn_w, bttn_h;   // button strip rects
+    short btn_sz, btn_blnk, btn_wid;                  // per-button geometry
+    // Exact real-pixel rects for the fullscreen draw. The logical rects above
+    // round-trip through SCONV (real_w/320); at 5120-wide that turns a 6px
+    // button strip into 0 (6*320/5120 == 0.3 -> 0) and the strip (and its
+    // region) collapse. Drawing straight from these real values avoids it.
+    int   view_x_r[2];   // [MFD_LEFT], [MFD_RIGHT]; view window left edge (real px)
+    int   view_y_r;
+    int   view_w_r, view_h_r;
+    int   bttn_x_r[2];   // button strip left edge (real px)
+    int   bttn_y_r;
+    int   bttn_w_r, bttn_h_r;
+    int   btn_sz_r, btn_blnk_r, btn_wid_r;  // per-button metrics (real px)
+} mfd_full_geom;
+
+static mfd_full_geom mfd_fg;
+
+// Uniform horizontal scale for the MFD view content (its vertical scale * 5:6),
+// swapped into convert_x while a view draws so the view's text/art keeps correct
+// proportions. convert_use_mode is untouched, so per-mode fonts still apply.
+static fix mfd_block_ux = FIX_UNIT, mfd_block_uy = FIX_UNIT;
+static fix mfd_block_ux_saved = FIX_UNIT, mfd_block_uy_saved = FIX_UNIT;
+static int mfd_view_w = 74, mfd_view_h = 58; // real-pixel size of the view canvas
+static int mfd_block_depth = 0;
+
+static void mfd_block_scale_begin(void) {
+    if (!full_game_3d)
+        return;
+    // Re-entrant: only the outermost begin saves/overrides, so nested draws
+    // (e.g. an MFD expose that re-enters MFD drawing) can't clobber the saved
+    // value and leak the override into the rest of the HUD.
+    if (mfd_block_depth++ == 0) {
+        // Swap BOTH scales so the view content scales uniformly with the
+        // (hudScale-sized) destination rect. Only X was overridden before,
+        // which left the content's Y at the mode's convert_y -- visible as
+        // "contents shrunk only horizontally" once hudScale moved the box.
+        mfd_block_ux_saved = convert_x[convert_type][convert_use_mode];
+        mfd_block_uy_saved = convert_y[convert_type][convert_use_mode];
+        convert_x[convert_type][convert_use_mode] = mfd_block_ux;
+        convert_y[convert_type][convert_use_mode] = mfd_block_uy;
+    }
+}
+
+static void mfd_block_scale_end(void) {
+    if (mfd_block_depth <= 0)
+        return;
+    if (--mfd_block_depth == 0) {
+        convert_x[convert_type][convert_use_mode] = mfd_block_ux_saved;
+        convert_y[convert_type][convert_use_mode] = mfd_block_uy_saved;
+    }
+}
+
+// Fullscreen MFD scale: 100 == "native-ish" (roughly 1.4x the original
+// logical size).  Driven by gShockPrefs.hudScale (see Prefs.h).
+static short mfd_user_scale = 100;
+
+static void mfd_compute_fullscreen_geometry(void) {
+    // ---- Layout units ----------------------------------------------------
+    // Every fullscreen overlay is drawn in the engine's 320x200 "logical"
+    // space and mapped to real pixels through SCONV_X/SCONV_Y. Those two
+    // scales are independent (SCONV_X = real_w/320, SCONV_Y = real_h/200),
+    // which reproduces the classic 4:3 look exactly: 320x200 art has a 5:6
+    // pixel aspect, and 640x480 (SCONV_X=2.0, SCONV_Y=2.4 -> 5:6) matches it
+    // pixel-for-pixel. On a 16:9 mode the two ratios diverge (1920x1080 gives
+    // 6.0/5.4 = 10:9), so anything laid out in raw logical space is stretched
+    // horizontally by 4/3.
+    //
+    // So lay the MFD out here in *real* pixels, using a single uniform scale
+    // (the vertical one) with the 5:6 pixel aspect folded into X only, then
+    // convert the results back to logical before storing them. The region
+    // system (input) and the SCONV-applied blits therefore still land on
+    // exactly these real-pixel rects, but the MFD keeps 4:3 proportions at
+    // every resolution instead of stretching.
+    // ----------------------------------------------------------------------
+
+    // hudScale drives this, and every other fullscreen HUD element.
+    hud_scale_pct  = hud_scale_clamp(gShockPrefs.hudScale ? gShockPrefs.hudScale : 100);
+    mfd_user_scale = hud_scale_pct;
+
+    const float real_w_f = (float)grd_cap->w;
+    const float real_h_f = (float)grd_cap->h;
+    const float par      = 5.0f / 6.0f;                                        // 320x200 pixel aspect
+//    const float sy       = (real_h_f / 200.0f) * ((float)mfd_user_scale / 100.0f); // real px per logical-y
+    const float sy = (float)mfd_user_scale / 100.0f;
+    const float sx       = sy;                                                // isotropic: no 5:6 fold (see inventory_recompute_layout)
+
+    // Element sizes in real pixels (same 74x58 / 6-wide / 9-and-2 buttons as
+    // the original HUD, just measured on the real framebuffer now).
+    int view_w   = (int)(74.0f * sx + 0.5f);
+    int view_h   = (int)(58.0f * sy + 0.5f);
+    int btn_w    = (int)( 6.0f * sx + 0.5f);
+    int btn_sz   = (int)( 9.0f * sy + 0.5f);
+    int btn_blnk = (int)( 2.0f * sy + 0.5f);
+    if (btn_blnk < 1) btn_blnk = 1;
+
+    // Sanity floors (real px).
+    if (view_w < (int)(40.0f * sx)) view_w = (int)(40.0f * sx);
+    if (view_h < (int)(30.0f * sy)) view_h = (int)(30.0f * sy);
+    if (btn_w  < 1) btn_w  = 1;
+    if (btn_sz < 1) btn_sz = 1;
+
+    int margin = (int)(2.0f * sx + 0.5f);
+    if (margin < 1) margin = 1;
+    int gap = (int)(1.0f * sx + 0.5f);
+    if (gap < 1) gap = 1;
+
+    // Left MFD: button strip on the outer (left) edge, view window inboard.
+    int left_btn_x  = margin;
+    int left_view_x = left_btn_x + btn_w + gap;
+    int left_view_r = left_view_x + view_w;
+
+    // Right MFD: mirror about the screen centre.
+    int right_btn_r  = (int)real_w_f - margin;
+    int right_btn_x  = right_btn_r - btn_w;
+    int right_view_r = right_btn_x - gap;
+    int right_view_x = right_view_r - view_w;
+
+    // HUD bounds: pull both MFD units in from the screen edges so they hug the
+    // bounded rect instead (no-op unless a bound is set).
+    {
+        int bound_l, bound_r;
+        hud_bounds_insets(&bound_l, &bound_r);
+        left_btn_x += bound_l;
+        left_view_x += bound_l;
+        left_view_r += bound_l;
+        right_btn_r -= bound_r;
+        right_btn_x -= bound_r;
+        right_view_r -= bound_r;
+        right_view_x -= bound_r;
+    }
+
+    // If the two view windows would overlap (very narrow screen), shrink them.
+    if (left_view_r > right_view_x) {
+        int overlap = left_view_r - right_view_x;
+        view_w -= overlap / 2 + 1;
+        if (view_w < (int)(40.0f * sx)) view_w = (int)(40.0f * sx);
+        left_view_r  = left_view_x + view_w;
+        right_view_x = right_view_r - view_w;
+    }
+
+    // Bottom-anchored, level with the inventory/message strip.
+    int view_y = (int)real_h_f - margin - view_h;
+    int btn_y  = view_y;
+
+    // Back to logical space so the region rects (input) and the SCONV blits
+    // land on exactly these real-pixel rectangles.
+#define R2LX(px) ((short)((px) * 320.0f / real_w_f))
+#define R2LY(py) ((short)((py) * 200.0f / real_h_f))
+// Ceil variants for REGION SIZES: a region must fully cover its drawn area,
+// so its logical width/height rounds UP (origins still truncate, so the
+// region starts where the draw starts). Truncating sizes left slivers of
+// drawn strip/view outside the input region at extreme resolutions.
+#define R2LXC(px) ((short)(((px) * 320.0f / real_w_f) + 0.999f))
+#define R2LYC(py) ((short)(((py) * 200.0f / real_h_f) + 0.999f))
+
+    mfd_fg.view_lx = R2LX(left_view_x);
+    mfd_fg.view_rx = R2LX(right_view_x);
+    mfd_fg.view_y  = R2LY(view_y);
+    mfd_fg.view_w  = R2LXC(view_w);
+    mfd_fg.view_h  = R2LYC(view_h);
+
+    mfd_fg.bttn_lx = R2LX(left_btn_x);
+    mfd_fg.bttn_rx = R2LX(right_btn_x);
+    mfd_fg.bttn_y  = R2LY(btn_y);
+    mfd_fg.bttn_w  = R2LXC(btn_w);
+    // The region rects live in 320x200 logical space, where a narrow strip
+    // rounds to 0 at extreme widths (5120: 6px * 320/5120 == 0), leaving the
+    // strip unclickable. Clamp to 1 logical unit so the input region stays live
+    // (the draw uses the exact real rects above, so it is unaffected).
+    if (mfd_fg.bttn_w < 1) mfd_fg.bttn_w = 1;
+
+    // Per-button metrics first, then derive the strip height from those *same*
+    // logical values.
+    //
+    // IMPORTANT: do not set bttn_h = R2LY(btn_h). Converting the real strip
+    // height and the real button metrics back to logical independently can
+    // desync them (e.g. R2LY(68) + R2LY(15) rounds down to 5*12+4*2 = 68
+    // while R2LY(400) rounds to 74), leaving the strip region a couple of
+    // logical px taller than the buttons inside it. mfd_button_callback then
+    // computes which_button = rel_y / (btn_sz + btn_blnk), which for a click
+    // in that slack can reach MFD_NUM_VIRTUAL_SLOTS -- out of range for
+    // cursor_strings[], whose OOB read was the segfault in make_popup_cursor.
+    mfd_fg.btn_sz   = R2LY(btn_sz);
+    mfd_fg.btn_blnk = R2LY(btn_blnk);
+    mfd_fg.btn_wid  = R2LX(btn_w) - 2;
+    if (mfd_fg.btn_sz < 1) mfd_fg.btn_sz = 1;
+    if (mfd_fg.btn_blnk < 1) mfd_fg.btn_blnk = 1;
+    if (mfd_fg.btn_wid < 1) mfd_fg.btn_wid = 1;
+
+    // Region/rect height: ceil the REAL strip height back to logical space so
+    // the input region always covers the drawn strip. The old per-button sum
+    // (N*R2LY(btn_sz) + (N-1)*R2LY(btn_blnk)) truncated up to one SCONV_Y per
+    // term, leaving the region short of the strip bottom by up to ~9*SCONV_Y
+    // real px, which swallowed the lowest buttons' hit zones. The +1 guards the
+    // truncation of the region origin (bttn_y = R2LY(btn_y)). A slightly taller
+    // region is safe: mfd_button_callback maps clicks in real pixels and
+    // range-checks which_button against MFD_NUM_VIRTUAL_SLOTS.
+    mfd_fg.bttn_h = R2LYC((float)(MFD_NUM_VIRTUAL_SLOTS * btn_sz +
+                                  (MFD_NUM_VIRTUAL_SLOTS - 1) * btn_blnk)) + 1;
+
+    // The view is drawn with this uniform scale and blitted 1:1, so the canvas
+    // is exactly the view's real size (see mfd_update_screen_mode /
+    // fullscreen_refresh_mfd).
+    mfd_view_w = view_w;
+    mfd_view_h = view_h;
+    mfd_block_ux = fix_div(fix_make(view_w, 0), fix_make(74, 0));
+    mfd_block_uy = fix_div(fix_make(view_h, 0), fix_make(58, 0));
+
+    // Exact real-pixel geometry for the fullscreen draw (no logical round-trip).
+    mfd_fg.view_x_r[MFD_LEFT]  = left_view_x;
+    mfd_fg.view_x_r[MFD_RIGHT] = right_view_x;
+    mfd_fg.view_y_r = view_y;
+    mfd_fg.view_w_r = view_w;
+    mfd_fg.view_h_r = view_h;
+    mfd_fg.bttn_x_r[MFD_LEFT]  = left_btn_x;
+    mfd_fg.bttn_x_r[MFD_RIGHT] = right_btn_x;
+    mfd_fg.bttn_y_r = btn_y;
+    mfd_fg.bttn_w_r = btn_w;
+    mfd_fg.bttn_h_r = MFD_NUM_VIRTUAL_SLOTS * btn_sz + (MFD_NUM_VIRTUAL_SLOTS - 1) * btn_blnk;
+    mfd_fg.btn_sz_r = btn_sz;
+    mfd_fg.btn_blnk_r = btn_blnk;
+    mfd_fg.btn_wid_r = btn_w;
+
+#undef R2LX
+#undef R2LY
+#undef R2LXC
+#undef R2LYC
+
+//INFO("MFD geom: view_lx=%d view_rx=%d view_w=%d view_h=%d btn_lx=%d btn_rx=%d",
+//     mfd_fg.view_lx, mfd_fg.view_rx, mfd_fg.view_w, mfd_fg.view_h,
+//     mfd_fg.bttn_lx, mfd_fg.bttn_rx);
+//INFO("grd_cap=%dx%d  fullview_region rect=%d,%d..%d,%d",
+//     grd_cap->w, grd_cap->h,
+//     fullview_region->r->ul.x, fullview_region->r->ul.y,
+//     fullview_region->r->lr.x, fullview_region->r->lr.y);
+
+}
+
+// Applies the geometry in mfd_fg to the live MFD rects and to the four
+// fullscreen regions. Safe to call repeatedly; region_move clips against the
+// parent (fullview_region) automatically. Requires the fullscreen regions to
+// already exist (created in screen_init_mfd(TRUE)).
+// z-order for the fullscreen MFD regions (both view windows and both button
+// strips). It must sit above the "raised" z (2) used by full_raise_region()
+// and by the inventory / lean-meter / view-wrapper regions: with HUD bounds on,
+// the MFD units move inboard and their logical region rects overlap the
+// inventory panel region's (much wider) logical rect, so at equal z the
+// inventory region swallowed the strips' clicks (symptom: bounds on -> right
+// strip dead). The overlap is logical only -- the inventory panel is drawn far
+// inboard of the strip -- so raising the MFD regions above it just restores the
+// correct owner without affecting anything the user can actually see.
+#define MFD_REGION_Z 3
+
+static void mfd_apply_fullscreen_geometry(void) {
+    // Region rects must fully contain the real drawn rects. Convert each real
+    // span to logical by FLOORING the low edge and CEILING the high edge; a
+    // plain width conversion can fall a logical unit short when the low edge's
+    // fraction pushes the high edge past a logical boundary. That shortfall
+    // left only part of the button strip inside the input region at some HUD
+    // scales (5120x1000 at 200%: strip real x 3213..3223, region x 3200..3216
+    // -> only ~3px clickable, i.e. the strip "turned thin").
+    const float l2sx = 320.0f / (float)grd_cap->w;
+    const float l2sy = 200.0f / (float)grd_cap->h;
+#define RLX0(px) ((short)((px) * l2sx))
+#define RLX1(px) ((short)((px) * l2sx + 0.999f))
+#define RLY0(py) ((short)((py) * l2sy))
+#define RLY1(py) ((short)((py) * l2sy + 0.999f))
+
+    int p;
+    for (p = 0; p < NUM_MFDS; p++) {
+        LGRect vr, br;
+
+        vr.ul.x = RLX0(mfd_fg.view_x_r[p]);
+        vr.ul.y = RLY0(mfd_fg.view_y_r);
+        vr.lr.x = RLX1(mfd_fg.view_x_r[p] + mfd_fg.view_w_r);
+        vr.lr.y = RLY1(mfd_fg.view_y_r + mfd_fg.view_h_r);
+
+        br.ul.x = RLX0(mfd_fg.bttn_x_r[p]);
+        br.ul.y = RLY0(mfd_fg.bttn_y_r);
+        br.lr.x = RLX1(mfd_fg.bttn_x_r[p] + mfd_fg.bttn_w_r);
+        br.lr.y = RLY1(mfd_fg.bttn_y_r + mfd_fg.bttn_h_r);
+
+        // Resize as well as move: the regions are created once (in
+        // screen_init_mfd) but the layout is recomputed on every HUD-scale /
+        // bounds change, so the size must follow too.
+        region_move  (&(mfd[p].reg2), vr.ul.x, vr.ul.y, MFD_REGION_Z);
+        region_resize(&(mfd[p].reg2), vr.lr.x - vr.ul.x, vr.lr.y - vr.ul.y);
+        // Button strips are moved last so they win any one-unit overlap with
+        // the view rect (same z).
+        region_move  (&(mfd[p].bttn.reg2), br.ul.x, br.ul.y, MFD_REGION_Z);
+        region_resize(&(mfd[p].bttn.reg2), br.lr.x - br.ul.x, br.lr.y - br.ul.y);
+    }
+#undef RLX0
+#undef RLX1
+#undef RLY0
+#undef RLY1
+
+    mfd[MFD_LEFT].rect.ul.x  = mfd_fg.view_lx;
+    mfd[MFD_LEFT].rect.ul.y  = mfd_fg.view_y;
+    mfd[MFD_LEFT].rect.lr.x  = mfd_fg.view_lx + mfd_fg.view_w;
+    mfd[MFD_LEFT].rect.lr.y  = mfd_fg.view_y  + mfd_fg.view_h;
+    mfd[MFD_RIGHT].rect.ul.x = mfd_fg.view_rx;
+    mfd[MFD_RIGHT].rect.ul.y = mfd_fg.view_y;
+    mfd[MFD_RIGHT].rect.lr.x = mfd_fg.view_rx + mfd_fg.view_w;
+    mfd[MFD_RIGHT].rect.lr.y = mfd_fg.view_y  + mfd_fg.view_h;
+
+    mfd[MFD_LEFT].bttn.rect.ul.x  = mfd_fg.bttn_lx;
+    mfd[MFD_LEFT].bttn.rect.ul.y  = mfd_fg.bttn_y;
+    mfd[MFD_LEFT].bttn.rect.lr.x  = mfd_fg.bttn_lx + mfd_fg.bttn_w;
+    mfd[MFD_LEFT].bttn.rect.lr.y  = mfd_fg.bttn_y  + mfd_fg.bttn_h;
+    mfd[MFD_RIGHT].bttn.rect.ul.x = mfd_fg.bttn_rx;
+    mfd[MFD_RIGHT].bttn.rect.ul.y = mfd_fg.bttn_y;
+    mfd[MFD_RIGHT].bttn.rect.lr.x = mfd_fg.bttn_rx + mfd_fg.bttn_w;
+    mfd[MFD_RIGHT].bttn.rect.lr.y = mfd_fg.bttn_y  + mfd_fg.bttn_h;
+}
+
+// Called when the user changes the HUD scale. Clamps, pushes the new value to
+// every fullscreen HUD element and forces the fullscreen overlay to redraw at
+// the new size.
+void mfd_set_hud_scale(short pct) {
+    hud_scale_pct  = hud_scale_clamp(pct);
+    mfd_user_scale = hud_scale_pct;
+    if (full_game_3d) {
+        mfd_compute_fullscreen_geometry();
+        mfd_apply_fullscreen_geometry();
+        mfd_force_update();
+        // The inventory and vitals draw to the scaled layout (inv_real_* /
+        // vitals_* now include hud_scale_factor()), but their canvases and
+        // regions were built from the old size. Re-run the same refreshes the
+        // mode-change path uses (change_svga_screen_mode ->
+        // inventory_update_screen_mode / status_vitals_update) so the hitboxes
+        // and block canvases follow the boxes.
+        inventory_update_screen_mode();
+	init_all_side_icons();
+	side_icon_rebuild_regions();
+        status_vitals_update(TRUE);
+	change_svga_cursors();
+	lean_meter_update_screen_mode();
+        fullscreen_overlay();
+    }
+}
+
+// Re-lays-out the fullscreen HUD after a bounds change. Reuses the HUD-scale
+// refresh (geometry -> regions -> canvases -> redraw), which consults
+// hud_bounds_insets(). Outside fullscreen it does nothing; the new bounds are
+// picked up when the fullscreen HUD is next built.
+void hud_bounds_apply(void) { mfd_set_hud_scale(hud_scale_pct); }
+
+// Sets the bounds mode (HUD_BOUND_*) and, if cw/ch are both > 0, the custom
+// ratio, then applies it. Does not write the prefs file -- the caller decides
+// whether to SavePrefs().
+void hud_bounds_set(short mode, short cw, short ch) {
+    if (mode < HUD_BOUND_OFF || mode > HUD_BOUND_CUSTOM)
+        mode = HUD_BOUND_OFF;
+    gShockPrefs.hudBoundMode = mode;
+    if (cw > 0 && ch > 0) {
+        gShockPrefs.hudBoundCustomW = cw;
+        gShockPrefs.hudBoundCustomH = ch;
+    }
+    hud_bounds_apply();
+}
+
+// off -> 4:3 -> 16:9 -> custom -> off. Handy for a menu button or hotkey.
+void hud_bounds_cycle(void) { hud_bounds_set((short)((gShockPrefs.hudBoundMode + 1) % 4), 0, 0); }
+
+
 // -----------
 // Prototypes
 // -----------
@@ -103,6 +843,25 @@ void mfd_select_button(int which_panel, int which_button);
 
 void mfd_default_mru(uchar func);
 void set_mfd_from_defaults(int mfd_id, uchar func, uchar slot);
+
+static void mfd_remap_event_pos(MFD *m, LGRegion *r, uiEvent *e);
+
+// Maps an event whose position is in the fullview region's 320x200 space into
+// the MFD view's 74x58 canvas space, using the drawn (real-pixel) view rect.
+// Used by the minigames, which sample the mouse directly (not via a region
+// event) -- without this their synthetic events used a different scale than
+// real ones and the game reacted erratically. Callers must build the synthetic
+// event's position as a 320x200 coordinate (ui_mouse_get_xy() already does).
+void mfd_view_event_to_canvas(MFD *m, uiEvent *e);
+
+void hud_dump_layout(void);
+
+// HUD overlay module
+int  hud_register(grs_canvas *canvas, int src_w, int src_h, int anchor,
+                  int margin_x, int margin_y, const char *name);
+void hud_layout(void);
+void hud_redraw(void);
+LGPoint hud_screen_to_canvas(hud_element *e, LGPoint screen);
 
 // KLC  dbg_mfd_state used to be here.
 
@@ -203,31 +962,116 @@ void screen_init_mfd(uchar fullscrn) {
     lval = MFD_LEFT;  // Screen callbacks need to know their
     rval = MFD_RIGHT; // left from their right, thusly
 
+//    // Set up the Rect structures for MFD screen-space
+//
+//    // Left View Window
+//    mfdL.rect.ul.x = MFD_VIEW_LFTX;
+//    mfdL.rect.ul.y = MFD_VIEW_Y;
+//    mfdL.rect.lr.x = MFD_VIEW_LFTX + MFD_VIEW_WID;
+//    mfdL.rect.lr.y = MFD_VIEW_Y + MFD_VIEW_HGT;
+//
+//    // Right View Window
+//    mfdR.rect.ul.x = MFD_VIEW_RGTX;
+//    mfdR.rect.ul.y = MFD_VIEW_Y;
+//    mfdR.rect.lr.x = MFD_VIEW_RGTX + MFD_VIEW_WID;
+//    mfdR.rect.lr.y = MFD_VIEW_Y + MFD_VIEW_HGT;
+//
+//    // Left Button Panel
+//    mfdL.bttn.rect.ul.x = MFD_BTTN_LFTX;
+//    mfdL.bttn.rect.ul.y = MFD_BTTN_Y;
+//    mfdL.bttn.rect.lr.x = MFD_BTTN_LFTX + MFD_BTTN_WID;
+//    mfdL.bttn.rect.lr.y = MFD_BTTN_Y + MFD_BTTN_HGT;
+//
+//    // Right Button Panel
+//    mfdR.bttn.rect.ul.x = MFD_BTTN_RGTX;
+//    mfdR.bttn.rect.ul.y = MFD_BTTN_Y;
+//   mfdR.bttn.rect.lr.x = MFD_BTTN_RGTX + MFD_BTTN_WID;
+//    mfdR.bttn.rect.lr.y = MFD_BTTN_Y + MFD_BTTN_HGT;
+
+void hud_dump_layout(void) {
+    INFO("HUD LAYOUT DUMP");
+    INFO("  invdims:  INV_PANEL=(%d,%d) %dx%d",
+         INVENTORY_PANEL_X, INVENTORY_PANEL_Y,
+         INVENTORY_PANEL_WIDTH, INVENTORY_PANEL_HEIGHT);
+    INFO("  invdims:  GAME_MSG=(%d,%d) %dx%d",
+         GAME_MESSAGE_X, GAME_MESSAGE_Y, GAME_MESSAGE_W, GAME_MESSAGE_H);
+    INFO("  mfddims:  MFD_VIEW_L=(%d,%d) %dx%d  R=(%d,%d) %dx%d",
+         MFD_VIEW_LFTX, MFD_VIEW_Y, MFD_VIEW_WID, MFD_VIEW_HGT,
+         MFD_VIEW_RGTX, MFD_VIEW_Y, MFD_VIEW_WID, MFD_VIEW_HGT);
+    INFO("  mfddims:  MFD_BTTN_L=(%d,%d) %dx%d  R=(%d,%d) %dx%d",
+         MFD_BTTN_LFTX, MFD_BTTN_Y, MFD_BTTN_WID, MFD_BTTN_HGT,
+         MFD_BTTN_RGTX, MFD_BTTN_Y, MFD_BTTN_WID, MFD_BTTN_HGT);
+    INFO("  screen:   grd_cap=%dx%d  convert_use_mode=%d  full_game_3d=%d",
+         grd_cap->w, grd_cap->h, convert_use_mode, full_game_3d);
+
+    extern LGRegion *inventory_region;
+    extern LGRegion *pagebutton_region;
+    if (inventory_region && inventory_region->r) {
+        INFO("  inv region rect: (%d,%d)-(%d,%d)",
+             inventory_region->r->ul.x, inventory_region->r->ul.y,
+             inventory_region->r->lr.x, inventory_region->r->lr.y);
+    }
+    if (pagebutton_region && pagebutton_region->r) {
+        INFO("  pagebtn region rect: (%d,%d)-(%d,%d)",
+             pagebutton_region->r->ul.x, pagebutton_region->r->ul.y,
+             pagebutton_region->r->lr.x, pagebutton_region->r->lr.y);
+    }
+    INFO("  mfd[0].rect: (%d,%d)-(%d,%d)", mfd[0].rect.ul.x, mfd[0].rect.ul.y,
+         mfd[0].rect.lr.x, mfd[0].rect.lr.y);
+    INFO("  mfd[1].rect: (%d,%d)-(%d,%d)", mfd[1].rect.ul.x, mfd[1].rect.ul.y,
+         mfd[1].rect.lr.x, mfd[1].rect.lr.y);
+}
+
+
     // Set up the Rect structures for MFD screen-space
+    if (fullscrn) {
+        // Fullscreen: compute geometry in 320x200 logical space and
+        // place the four rects there.  fullview_region (the parent)
+        // is 320x200, and the SS layer takes the whole thing up to
+        // the real framebuffer size.
+        mfd_compute_fullscreen_geometry();
 
-    // Left View Window
-    mfdL.rect.ul.x = MFD_VIEW_LFTX;
-    mfdL.rect.ul.y = MFD_VIEW_Y;
-    mfdL.rect.lr.x = MFD_VIEW_LFTX + MFD_VIEW_WID;
-    mfdL.rect.lr.y = MFD_VIEW_Y + MFD_VIEW_HGT;
+        mfdL.rect.ul.x = mfd_fg.view_lx;
+        mfdL.rect.ul.y = mfd_fg.view_y;
+        mfdL.rect.lr.x = mfd_fg.view_lx + mfd_fg.view_w;
+        mfdL.rect.lr.y = mfd_fg.view_y  + mfd_fg.view_h;
 
-    // Right View Window
-    mfdR.rect.ul.x = MFD_VIEW_RGTX;
-    mfdR.rect.ul.y = MFD_VIEW_Y;
-    mfdR.rect.lr.x = MFD_VIEW_RGTX + MFD_VIEW_WID;
-    mfdR.rect.lr.y = MFD_VIEW_Y + MFD_VIEW_HGT;
+        mfdR.rect.ul.x = mfd_fg.view_rx;
+        mfdR.rect.ul.y = mfd_fg.view_y;
+        mfdR.rect.lr.x = mfd_fg.view_rx + mfd_fg.view_w;
+        mfdR.rect.lr.y = mfd_fg.view_y  + mfd_fg.view_h;
 
-    // Left Button Panel
-    mfdL.bttn.rect.ul.x = MFD_BTTN_LFTX;
-    mfdL.bttn.rect.ul.y = MFD_BTTN_Y;
-    mfdL.bttn.rect.lr.x = MFD_BTTN_LFTX + MFD_BTTN_WID;
-    mfdL.bttn.rect.lr.y = MFD_BTTN_Y + MFD_BTTN_HGT;
+        mfdL.bttn.rect.ul.x = mfd_fg.bttn_lx;
+        mfdL.bttn.rect.ul.y = mfd_fg.bttn_y;
+        mfdL.bttn.rect.lr.x = mfd_fg.bttn_lx + mfd_fg.bttn_w;
+        mfdL.bttn.rect.lr.y = mfd_fg.bttn_y  + mfd_fg.bttn_h;
 
-    // Right Button Panel
-    mfdR.bttn.rect.ul.x = MFD_BTTN_RGTX;
-    mfdR.bttn.rect.ul.y = MFD_BTTN_Y;
-    mfdR.bttn.rect.lr.x = MFD_BTTN_RGTX + MFD_BTTN_WID;
-    mfdR.bttn.rect.lr.y = MFD_BTTN_Y + MFD_BTTN_HGT;
+        mfdR.bttn.rect.ul.x = mfd_fg.bttn_rx;
+        mfdR.bttn.rect.ul.y = mfd_fg.bttn_y;
+        mfdR.bttn.rect.lr.x = mfd_fg.bttn_rx + mfd_fg.bttn_w;
+        mfdR.bttn.rect.lr.y = mfd_fg.bttn_y  + mfd_fg.bttn_h;
+    } else {
+        // Non-fullscreen: original 320x200 in-game layout, verbatim.
+        mfdL.rect.ul.x = MFD_VIEW_LFTX;
+        mfdL.rect.ul.y = MFD_VIEW_Y;
+        mfdL.rect.lr.x = MFD_VIEW_LFTX + MFD_VIEW_WID;
+        mfdL.rect.lr.y = MFD_VIEW_Y + MFD_VIEW_HGT;
+
+        mfdR.rect.ul.x = MFD_VIEW_RGTX;
+        mfdR.rect.ul.y = MFD_VIEW_Y;
+        mfdR.rect.lr.x = MFD_VIEW_RGTX + MFD_VIEW_WID;
+        mfdR.rect.lr.y = MFD_VIEW_Y + MFD_VIEW_HGT;
+
+        mfdL.bttn.rect.ul.x = MFD_BTTN_LFTX;
+        mfdL.bttn.rect.ul.y = MFD_BTTN_Y;
+        mfdL.bttn.rect.lr.x = MFD_BTTN_LFTX + MFD_BTTN_WID;
+        mfdL.bttn.rect.lr.y = MFD_BTTN_Y + MFD_BTTN_HGT;
+
+        mfdR.bttn.rect.ul.x = MFD_BTTN_RGTX;
+        mfdR.bttn.rect.ul.y = MFD_BTTN_Y;
+        mfdR.bttn.rect.lr.x = MFD_BTTN_RGTX + MFD_BTTN_WID;
+        mfdR.bttn.rect.lr.y = MFD_BTTN_Y + MFD_BTTN_HGT;
+    }
 
     // Now, actually create the four regions, and add handlers
     if (!fullscrn) {
@@ -245,6 +1089,20 @@ void screen_init_mfd(uchar fullscrn) {
                                MFD_LEFT, &id);
         uiInstallRegionHandler(&(mfdR.bttn.reg), (UI_EVENT_MOUSE | UI_EVENT_MOUSE_MOVE), mfd_button_callback,
                                MFD_RIGHT, &id);
+
+        // region_create() normalises the LGRect it is handed, which can leave the
+        // MFD view rect smaller than MFD_VIEW_WID x MFD_VIEW_HGT. Re-assert the
+        // exact logical view rect so the view content composes into the full view
+        // space and fills its box (mfd_update_display blits the SCONV-sized canvas
+        // into this rect).
+        mfdL.rect.ul.x = MFD_VIEW_LFTX;
+        mfdL.rect.ul.y = MFD_VIEW_Y;
+        mfdL.rect.lr.x = MFD_VIEW_LFTX + MFD_VIEW_WID;
+        mfdL.rect.lr.y = MFD_VIEW_Y + MFD_VIEW_HGT;
+        mfdR.rect.ul.x = MFD_VIEW_RGTX;
+        mfdR.rect.ul.y = MFD_VIEW_Y;
+        mfdR.rect.lr.x = MFD_VIEW_RGTX + MFD_VIEW_WID;
+        mfdR.rect.lr.y = MFD_VIEW_Y + MFD_VIEW_HGT;
     } else {
         uiCursorStack *cs;
         macro_region_create(fullview_region, &(mfdL.reg2), &(mfdL.rect));
@@ -273,6 +1131,12 @@ void screen_init_mfd(uchar fullscrn) {
                                MFD_RIGHT, &id);
     }
 
+    if (fullscrn) {
+        INFO("region after create: mfdL.reg2.r=(%d,%d)-(%d,%d) mfdR.reg2.r=(%d,%d)-(%d,%d)",
+             mfdL.reg2.r->ul.x, mfdL.reg2.r->ul.y, mfdL.reg2.r->lr.x, mfdL.reg2.r->lr.y,
+             mfdR.reg2.r->ul.x, mfdR.reg2.r->ul.y, mfdR.reg2.r->lr.x, mfdR.reg2.r->lr.y);
+    }
+
     if (!done_init) {
         done_init = TRUE;
 
@@ -293,30 +1157,71 @@ void screen_init_mfd(uchar fullscrn) {
         init_newmfd_button_cursors();
         mfd_init_funcs();
     }
+
+    if (!done_init) {
+        hud_dump_layout();
+    }
+
     return;
 }
 
 #ifdef SVGA_SUPPORT
 errtype mfd_update_screen_mode() {
+    if (full_game_3d) {
+        mfd_compute_fullscreen_geometry();
+        // The geometry is now expressed in real pixels, so it depends on the
+        // current framebuffer size and must be re-applied here (not just at
+        // first region creation in screen_init_mfd) after every resolution
+        // change -- otherwise a mode switch leaves the regions/rects pointing
+        // at the previous resolution's layout.
+        mfd_apply_fullscreen_geometry();
+    }
     if (convert_use_mode == 0) {
         gr_init_canvas(&_offscreen_mfd, mfd_canvas_bits, BMT_FLAT8, MFD_VIEW_WID, MFD_VIEW_HGT);
         gr_init_canvas(&_fullscreen_mfd, mfd_background.bits, BMT_FLAT8, MFD_VIEW_WID, MFD_VIEW_HGT);
     } else {
 
-        int new_width = SCONV_X(MFD_VIEW_WID);
-        int new_height = SCONV_Y(MFD_VIEW_HGT);
+        int new_width  = full_game_3d ? mfd_view_w : SCONV_X(MFD_VIEW_WID);
+        int new_height = full_game_3d ? mfd_view_h : SCONV_Y(MFD_VIEW_HGT);
+        size_t need = (size_t)new_width * (size_t)new_height;
 
-        // CC: Resize the MFD bytes to fit the new mode
-        free(mfd_background.bits);
-        free(mfd_canvas_bits);
+        // Do NOT free+malloc here in the common case. wrapper.c overlays the
+        // options panel's OButtons array on _offscreen_mfd.bm.bits (which
+        // aliases mfd_canvas_bits), so reallocating this buffer makes the
+        // OButtons pointer dangle -- any option-panel access after a mode
+        // change reads/writes freed memory. Track capacity and only grow,
+        // never shrink or move. The initial allocation in screen_init_mfd()
+        // is MAX_WD(MFD_VIEW_WID) * MAX_HT(MFD_VIEW_HGT), larger than any
+        // runtime size will ever need, so this branch won't fire in practice.
+        static size_t mfd_canvas_capacity = 0;
+        static size_t mfd_bg_capacity = 0;
 
-        mfd_background.bits = (uchar *)malloc(new_width * new_height);
-        mfd_canvas_bits = (uchar *)malloc(new_width * new_height);
+        if (mfd_canvas_capacity == 0) {
+            mfd_canvas_capacity = (size_t)MAX_WD(MFD_VIEW_WID) * MAX_HT(MFD_VIEW_HGT);
+            mfd_bg_capacity     = mfd_canvas_capacity;
+        }
 
-        // Copy the background bytes
-        grs_bitmap *bm = lock_bitmap_from_ref(REF_IMG_bmBlankMFD);
-        LG_memcpy(mfd_background.bits, bm->bits, bm->w * bm->h);
-        RefUnlock(REF_IMG_bmBlankMFD);
+        if (need > mfd_canvas_capacity) {
+            free(mfd_canvas_bits);
+            mfd_canvas_bits = (uchar *)malloc(need);
+            mfd_canvas_capacity = need;
+        }
+        if (need > mfd_bg_capacity) {
+            free(mfd_background.bits);
+            mfd_background.bits = (uchar *)malloc(need);
+            mfd_bg_capacity = need;
+        }
+
+        // Copy the background bytes, clamped: source art is 74x58, the
+        // destination may be smaller in non-fullscreen modes.
+        {
+            grs_bitmap *bm = lock_bitmap_from_ref(REF_IMG_bmBlankMFD);
+            size_t dst_bytes = (size_t)new_width * new_height;
+            size_t src_bytes = (size_t)bm->w * bm->h;
+            size_t n = dst_bytes < src_bytes ? dst_bytes : src_bytes;
+            LG_memcpy(mfd_background.bits, bm->bits, n);
+            RefUnlock(REF_IMG_bmBlankMFD);
+        }
 
         gr_init_canvas(&_offscreen_mfd, mfd_canvas_bits, BMT_FLAT8, new_width, new_height);
         gr_init_canvas(&_fullscreen_mfd, mfd_background.bits, BMT_FLAT8, new_width, new_height);
@@ -456,7 +1361,9 @@ void mfd_notify_func(ubyte fnum, ubyte snum, uchar Grab, MFD_Status stat, uchar 
 
         for (i = 0; i < NUM_MFDS; i++) {
             if (oldf != fnum && player_struct.mfd_current_slots[i] == snum) {
+                mfd_block_scale_begin();
                 mfd_funcs[oldf].expose(&(mfd[i]), 0);
+                mfd_block_scale_end();
             }
         }
 #ifdef SVGA_SUPPORT
@@ -537,7 +1444,9 @@ void mfd_set_slot(ubyte mfd_id, ubyte newSlot, uchar OnOff) {
         ss_set_hack_mode(MFD_STEREO_HACK_MODE, &temp);
         f_id = mfd_get_func(mfd_id, newSlot);
         f = &(mfd_funcs[f_id]);
+        mfd_block_scale_begin();
         f->expose(&(mfd[mfd_id]), 0);
+        mfd_block_scale_end();
         ss_set_hack_mode(0, &temp);
         gr2ss_override = old_over;
     }
@@ -574,7 +1483,11 @@ void mfd_set_slot(ubyte mfd_id, ubyte newSlot, uchar OnOff) {
             {
                 full_visible |= visible_mask(mfd_id);
             }
-            full_raise_region(&mfd[mfd_id].reg2);
+            // Keep the view at the same z as mfd_apply_fullscreen_geometry()
+            // (full_raise_region() only goes to z=2, which would drop it back
+            // below the inventory region in the bounds overlap).
+            region_move(&mfd[mfd_id].reg2, mfd[mfd_id].reg2.r->ul.x,
+                        mfd[mfd_id].reg2.r->ul.y, MFD_REGION_Z);
             chg_set_sta(FULLSCREEN_UPDATE);
         }
     }
@@ -752,6 +1665,7 @@ uchar mfd_object_cursor_handler(uiEvent *ev, LGRegion *reg, int which_mfd) {
     ObjID obj = object_on_cursor;
     if (ev->type != UI_EVENT_MOUSE)
         return TRUE;
+    mfd_remap_event_pos(&mfd[which_mfd], reg, ev);
     if (ev->subtype & (MOUSE_RDOWN | MOUSE_LDOWN)) {
         object_button_down = TRUE;
         retval = TRUE;
@@ -804,6 +1718,83 @@ uchar mfd_object_cursor_handler(uiEvent *ev, LGRegion *reg, int which_mfd) {
     // The callback for the MFD view windows.  Triggered by mouseclicks inside
     // the regions.
 
+// In fullscreen mode, the MFD view canvas (74x58) is stretch-blitted into
+// a larger destination rect (mfd_fg.view_w x mfd_fg.view_h).  Mouse events
+// arrive in the destination rect's coordinate space (which is fullview_region's
+// 320x200 space), but all the per-function handlers in mfdfunc.c assume
+// canvas space -- they do `pos.x -= m->rect.ul.x` and then compare against
+// rects defined in canvas coordinates.  To keep those handlers unchanged,
+// we pre-rewrite e->pos such that after the handler's own subtraction, the
+// result is canvas-space.
+//
+//   canvas_pos = (e->pos - m->rect.ul) * canvas_size / dest_size
+//   rewritten  = m->rect.ul + canvas_pos
+//   handler sees rewritten - m->rect.ul == canvas_pos
+//
+// In non-fullscreen mode the dest size equals the canvas size, so the
+// rewrite is a no-op and we skip it entirely.
+void mfd_view_event_to_canvas(MFD *m, uiEvent *e) {
+    int cx, cy;
+    if (!full_game_3d)
+        return;
+    if (mfd_fg.view_w_r <= 0 || mfd_fg.view_h_r <= 0)
+        return;
+    cx = (int)((SCONV_X(e->pos.x) - mfd_fg.view_x_r[m->id]) * MFD_VIEW_WID / mfd_fg.view_w_r);
+    cy = (int)((SCONV_Y(e->pos.y) - mfd_fg.view_y_r) * MFD_VIEW_HGT / mfd_fg.view_h_r);
+    e->pos.x = m->rect.ul.x + cx;
+    e->pos.y = m->rect.ul.y + cy;
+}
+
+static void mfd_remap_event_pos(MFD *m, LGRegion *r, uiEvent *e) {
+    const LGRect *rr;
+    short rw, rh, cx, cy;
+    if (!full_game_3d)
+        return;
+    // Map the view's own input rect -- the region the hit-test just used, which
+    // SCONV-maps onto the drawn real view -- into the 74x58 canvas space the
+    // per-function handlers work in. Using the region guarantees that any click
+    // that reaches this handler maps inside 0..MFD_VIEW_*, i.e. the whole
+    // reachable area lines up with the drawn view (mfd_fg can disagree with the
+    // region, which left only a sub-strip interactive).
+    rr = r->r;
+    rw = rr->lr.x - rr->ul.x;
+    rh = rr->lr.y - rr->ul.y;
+    if (rw <= 0 || rh <= 0)
+        return;
+    if (rw < 4 || rh < 4) {
+        // Degenerate/short region (e.g. a stale strip): fall back to the drawn
+        // real-pixel view rect so the cursor still lines up with the game.
+        if (mfd_fg.view_w_r <= 0 || mfd_fg.view_h_r <= 0)
+            return;
+        cx = (short)((SCONV_X(e->pos.x) - mfd_fg.view_x_r[m->id]) * MFD_VIEW_WID / mfd_fg.view_w_r);
+        cy = (short)((SCONV_Y(e->pos.y) - mfd_fg.view_y_r) * MFD_VIEW_HGT / mfd_fg.view_h_r);
+        e->pos.x = m->rect.ul.x + cx;
+        e->pos.y = m->rect.ul.y + cy;
+        return;
+    }
+    cx = (short)((e->pos.x - rr->ul.x) * MFD_VIEW_WID / rw);
+    cy = (short)((e->pos.y - rr->ul.y) * MFD_VIEW_HGT / rh);
+    {
+        // One-shot diagnostic per MFD: helps pin down minigame input problems
+        // (which region owns the click, and where the canvas point lands).
+        static uchar dbg_done[2] = {0, 0};
+        int di = (m->id == MFD_RIGHT) ? 1 : 0;
+        if (!dbg_done[di]) {
+            dbg_done[di] = 1;
+            INFO("MFD input dbg id=%d reg=(%d,%d)-(%d,%d) rect=(%d,%d)-(%d,%d) fgview=(%d,%d)+%dx%d "
+                 "ev=(%d,%d) canvas=(%d,%d)",
+                 m->id, rr->ul.x, rr->ul.y, rr->lr.x, rr->lr.y,
+                 m->rect.ul.x, m->rect.ul.y, m->rect.lr.x, m->rect.lr.y,
+                 mfd_fg.view_x_r[m->id], mfd_fg.view_y_r, mfd_fg.view_w_r, mfd_fg.view_h_r,
+                 e->pos.x, e->pos.y, cx, cy);
+        }
+    }
+    // Encode canvas space as m->rect.ul + canvas: the handlers then do their own
+    // "pos -= m->rect.ul" and land exactly in canvas coordinates.
+    e->pos.x = m->rect.ul.x + cx;
+    e->pos.y = m->rect.ul.y + cy;
+}
+
 #define SEARCH_MARGIN 2
 
 uchar mfd_scan_opacity(int mfd_id, LGPoint epos) {
@@ -814,6 +1805,10 @@ uchar mfd_scan_opacity(int mfd_id, LGPoint epos) {
 
     pos.x -= mfd[mfd_id].reg.abs_x;
     pos.y -= mfd[mfd_id].reg.abs_y;
+    // The view canvas is uniform-scaled, so map the 74x58 view space to canvas
+    // pixels with the block scale (guarded to the canvas).
+    pos.x = (short)(pos.x * mfd_view_w / MFD_VIEW_WID);
+    pos.y = (short)(pos.y * mfd_view_h / MFD_VIEW_HGT);
     gr_push_canvas(cv);
     for (x = pos.x - SEARCH_MARGIN; x <= pos.x + SEARCH_MARGIN; x++)
         for (y = pos.y - SEARCH_MARGIN; y <= pos.y + SEARCH_MARGIN; y++)
@@ -831,9 +1826,13 @@ uchar mfd_view_callback_full(uiEvent *e, LGRegion *r, intptr_t udata) {
     else
         mask = FULL_L_MFD_MASK;
     if (full_visible & mask) {
+        // Save the 320x200 position: mfd_view_callback() rewrites e->pos into
+        // canvas space for the function handlers, but mfd_scan_opacity() maps
+        // the region-relative logical position itself.
+        LGPoint saved = e->pos;
         retval = mfd_view_callback(e, r, udata);
         if (!retval) {
-            retval = mfd_scan_opacity(udata, e->pos);
+            retval = mfd_scan_opacity(udata, saved);
         }
     }
     return retval;
@@ -856,6 +1855,8 @@ uchar mfd_view_callback(uiEvent *e, LGRegion *r, intptr_t udata) {
         m = &mfdL;
     else
         m = &mfdR;
+
+    mfd_remap_event_pos(m, r, e);
 
     if (input_cursor_mode == INPUT_OBJECT_CURSOR)
         return mfd_object_cursor_handler(e, r, which_mfd);
@@ -919,8 +1920,40 @@ uchar mfd_button_callback(uiEvent *e, LGRegion *r, intptr_t udata) {
         which_panel = (int)udata;
 
         // Divide mouseclick height to discover which button we meant
-        result = div((e->pos.y - MFD_BTTN_Y), MFD_BTTN_SZ + MFD_BTTN_BLNK);
+//        result = div((e->pos.y - MFD_BTTN_Y), MFD_BTTN_SZ + MFD_BTTN_BLNK);
+//        which_button = result.quot;
+
+        // Divide mouseclick height to discover which button we meant.
+        // In fullscreen the buttons are DRAWN at exact real pixels (see
+        // mfd_draw_button / mfd_compute_fullscreen_geometry), so the click must
+        // be tested in real pixels too: convert the event's logical y through
+        // SCONV_Y, then hit-test against the real strip geometry
+        // (bttn_y_r / btn_sz_r / btn_blnk_r). Testing against the logical rect
+        // directly made clicks and drawn buttons diverge at extreme resolutions
+        // (5120x1000), where the logical strip collapses to ~1 unit.
+        short rel_y, stride, btn_sz;
+        if (full_game_3d) {
+            int real_y = SCONV_Y(e->pos.y);
+            rel_y  = (short)(real_y - mfd_fg.bttn_y_r);
+            stride = (short)mfd_fg.btn_sz_r + (short)mfd_fg.btn_blnk_r;
+            btn_sz = (short)mfd_fg.btn_sz_r;
+        } else {
+            rel_y  = e->pos.y - MFD_BTTN_Y;
+            stride = MFD_BTTN_SZ + MFD_BTTN_BLNK;
+            btn_sz = MFD_BTTN_SZ;
+        }
+        if (rel_y < 0) return FALSE;
+        if (stride <= 0) return FALSE; // guard against a degenerate button strip
+        result = div(rel_y, stride);
         which_button = result.quot;
+
+        // The strip rect and the button stride can disagree by a pixel or two
+        // after rounding (see mfd_compute_fullscreen_geometry), so a click in
+        // the trailing slack can map past the last button. cursor_strings[]
+        // has exactly MFD_NUM_VIRTUAL_SLOTS entries, so indexing it out of
+        // range reads a garbage pointer and crashes deeper in the cursor code.
+        if ((which_button < 0) || (which_button >= MFD_NUM_VIRTUAL_SLOTS))
+            return FALSE;
 
         cnum = which_button;
 
@@ -944,7 +1977,9 @@ uchar mfd_button_callback(uiEvent *e, LGRegion *r, intptr_t udata) {
                 return TRUE; // ignore all but left clickdowns
 
             // If things are ok, select button
-            if ((result.rem < MFD_BTTN_SZ) && (which_button < MFD_NUM_VIRTUAL_SLOTS))
+//            if ((result.rem < MFD_BTTN_SZ) && (which_button < MFD_NUM_VIRTUAL_SLOTS))
+
+            if ((result.rem < btn_sz) && (which_button < MFD_NUM_VIRTUAL_SLOTS))
                 mfd_select_button(which_panel, which_button);
         }
     }
@@ -1123,7 +2158,9 @@ uchar mfd_update_current_slot(ubyte mfd_id, ubyte status, ubyte num_steps) {
             gr_pop_canvas();
         }
 
+        mfd_block_scale_begin();
         f->expose(m, control); // pass # steps + flags to
+        mfd_block_scale_end();
 #ifdef SVGA_SUPPORT
         ss_set_hack_mode(0, &temp);
         gr2ss_override = old_over;
@@ -1182,9 +2219,15 @@ void fullscreen_refresh_mfd(ubyte mfd_id) {
     if (visible) {
         pmfd_canvas = (mfd_id == MFD_RIGHT) ? &_fullscreen_mfd : &_offscreen_mfd;
 
-        r.ul = MakePoint(0, 0);
-        r.lr = MakePoint(MFD_VIEW_WID, MFD_VIEW_HGT);
-        RECT_MOVE(&r, m->rect.ul);
+        // INFO("fullscreen_refresh_mfd id=%d m.rect=(%d,%d)-(%d,%d) fg3d=%d cum=%d visible=%d",
+        //      mfd_id, m->rect.ul.x, m->rect.ul.y, m->rect.lr.x, m->rect.lr.y,
+        //      full_game_3d, convert_use_mode, visible);
+
+        // Real-pixel view rect (no logical round-trip; see mfd_fg.view_x_r).
+        r.ul = MakePoint(mfd_fg.view_x_r[mfd_id], mfd_fg.view_y_r);
+        r.lr = MakePoint(mfd_fg.view_x_r[mfd_id] + mfd_fg.view_w_r,
+                         mfd_fg.view_y_r + mfd_fg.view_h_r);
+
         STORE_CLIP(a, b, c, d);
 #ifdef SVGA_SUPPORT
         gr2ss_override = OVERRIDE_ALL;
@@ -1208,9 +2251,11 @@ void fullscreen_refresh_mfd(ubyte mfd_id) {
             pmfd_canvas->bm.flags &= ~BMF_TRANS;
         } else {
 #endif
-            ss_safe_set_cliprect(r.ul.x, r.ul.y, r.lr.x, r.lr.y);
+            gr_safe_set_cliprect(r.ul.x, r.ul.y, r.lr.x, r.lr.y);
             pmfd_canvas->bm.flags |= BMF_TRANS;
-            ss_noscale_bitmap(&(pmfd_canvas->bm), m->rect.ul.x, m->rect.ul.y);
+            // Uniform-scaled canvas == the view's real size; blit 1:1 at the
+            // exact real rect from the geometry.
+            gr_bitmap(&(pmfd_canvas->bm), mfd_fg.view_x_r[mfd_id], mfd_fg.view_y_r);
             pmfd_canvas->bm.flags &= ~BMF_TRANS;
 #ifdef STEREO_SUPPORT
         }
@@ -1248,12 +2293,29 @@ void mfd_draw_button(ubyte mfd_id, ubyte b) {
 
     m = &(mfd[mfd_id]);
 
-    r.ul.x = m->bttn.rect.ul.x + 1;
-    r.ul.y = m->bttn.rect.ul.y + 1;
-    r.ul.y += (b * (MFD_BTTN_SZ + MFD_BTTN_BLNK));
+//    r.ul.x = m->bttn.rect.ul.x + 1;
+//    r.ul.y = m->bttn.rect.ul.y + 1;
+//    r.ul.y += (b * (MFD_BTTN_SZ + MFD_BTTN_BLNK));
+//
+//    r.lr.x = r.ul.x + MFD_BTTN_WID - 1;
+//    r.lr.y = r.ul.y + MFD_BTTN_SZ;
 
-    r.lr.x = r.ul.x + MFD_BTTN_WID - 1;
-    r.lr.y = r.ul.y + MFD_BTTN_SZ;
+    if (full_game_3d) {
+        // Real-pixel button rect (mfd_fg.*_r); see mfd_compute_fullscreen_geometry.
+        // NOTE: when the buttons are drawn as a bitmap the indicator must fit
+        // INSIDE that bitmap, so any size change must be driven by the bitmap /
+        // geometry -- not by a blind inset (a previous inset misaligned it).
+        r.ul.x = mfd_fg.bttn_x_r[mfd_id] + 1;
+        r.ul.y = mfd_fg.bttn_y_r + 1 + b * (mfd_fg.btn_sz_r + mfd_fg.btn_blnk_r);
+        r.lr.x = r.ul.x + mfd_fg.btn_wid_r - 2;
+        r.lr.y = r.ul.y + mfd_fg.btn_sz_r;
+    } else {
+        r.ul.x = m->bttn.rect.ul.x + 1;
+        r.ul.y = m->bttn.rect.ul.y + 1;
+        r.ul.y += (b * (MFD_BTTN_SZ + MFD_BTTN_BLNK));
+        r.lr.x = r.ul.x + MFD_BTTN_WID - 1;
+        r.lr.y = r.ul.y + MFD_BTTN_SZ;
+    }
 
     slot = player_struct.mfd_virtual_slots[mfd_id][b];
 
@@ -1274,7 +2336,10 @@ void mfd_draw_button(ubyte mfd_id, ubyte b) {
         gr_set_fcolor((long)MFD_BTTN_SELECT); // current
 
     uiHideMouse(&r);
-    ss_rect(r.ul.x, r.ul.y, r.lr.x - 2, r.lr.y - 2);
+    if (full_game_3d)
+        gr_rect(r.ul.x, r.ul.y, r.lr.x, r.lr.y);   // real px, no SCONV
+    else
+        ss_rect(r.ul.x, r.ul.y, r.lr.x - 2, r.lr.y - 2);
 /*{
         short		bx = (mfd_id == 0) ? 3 : 629;
         short		by = 333 + (b*26);
@@ -1295,15 +2360,53 @@ void mfd_draw_button(ubyte mfd_id, ubyte b) {
 
 #define MFD_PANEL_Y 326
 #define MFD_LEFT_PANEL_X 1
-#define MFD_RIGHT_PANEL_X 627
+// This panel's background art was authored assuming a real 640px-wide
+// screen (627 = 13px inset from the 640 right edge). These x values are
+// raw screen pixels here (not run through the SCONV_X logical->real
+// scaler), so on a wider-than-640 real resolution (e.g. a custom
+// widescreen mode) a literal 627 would leave the panel stranded well
+// short of the actual right edge. Anchor it to the real screen width
+// instead, keeping the same 13px inset, so it hugs the right edge at
+// any resolution.
+#define MFD_RIGHT_PANEL_INSET (640 - 627)
+
+//void mfd_draw_button_panel(ubyte mfd_id) {
+//    int x[2] = {MFD_LEFT_PANEL_X, grd_cap->w - MFD_RIGHT_PANEL_INSET};
+//
+//    draw_res_bm(REF_IMG_bmMFDButtonBackground, x[mfd_id], MFD_PANEL_Y);
+//    mfd_draw_all_buttons(mfd_id);
+//    return;
+//}
 
 void mfd_draw_button_panel(ubyte mfd_id) {
-    int x[2] = {MFD_LEFT_PANEL_X, MFD_RIGHT_PANEL_X};
-
-    draw_res_bm(REF_IMG_bmMFDButtonBackground, x[mfd_id], MFD_PANEL_Y);
+    if (full_game_3d) {
+        // Draw the button-strip background into the exact real-pixel strip rect
+        // (mfd_fg.bttn_*_r). The logical rect rounds a 6px strip to 0 at 5120
+        // wide, collapsing the strip.
+        FrameDesc *f = RefLock(REF_IMG_bmMFDButtonBackground);
+        if (f) {
+            gr_scale_bitmap(&f->bm,
+                            mfd_fg.bttn_x_r[mfd_id], mfd_fg.bttn_y_r,
+                            mfd_fg.bttn_w_r, mfd_fg.bttn_h_r);
+            RefUnlock(REF_IMG_bmMFDButtonBackground);
+        }
+    } else {
+        // Non-fullscreen: draw the panel background into the SAME logical strip
+        // rect the buttons use, so SCONV maps both together. (Previously it used
+        // raw 640x480 screen pixels -- MFD_PANEL_Y=326, grd_cap->w-13 -- which
+        // draw_res_bm feeds through SCONV again, landing the panel somewhere else
+        // entirely and clipping its art.)
+        int lx = (mfd_id == MFD_LEFT) ? MFD_BTTN_LFTX : MFD_BTTN_RGTX;
+        FrameDesc *f = RefLock(REF_IMG_bmMFDButtonBackground);
+        if (f) {
+            ss_scale_bitmap(&f->bm, lx, MFD_BTTN_Y, MFD_BTTN_WID, MFD_BTTN_HGT);
+            RefUnlock(REF_IMG_bmMFDButtonBackground);
+        }
+    }
     mfd_draw_all_buttons(mfd_id);
     return;
 }
+
 
 // ---------------------------------------------------------------------------
 // mfd_draw_all_buttons()
@@ -1484,6 +2587,11 @@ void mfd_update_rects(MFD *m) {
 // Updates a portion of the view window from canvas.
 
 void mfd_update_display(MFD *m, short x0, short y0, short x1, short y1) {
+
+    // INFO("mfd_update_display id=%d m.rect=(%d,%d)-(%d,%d) args=(%d,%d)-(%d,%d) fg3d=%d cum=%d",
+    //      m->id, m->rect.ul.x, m->rect.ul.y, m->rect.lr.x, m->rect.lr.y,
+    //      x0, y0, x1, y1, full_game_3d, convert_use_mode);
+
     ushort a, b, c, d;
     uchar old_over = gr2ss_override;
 
@@ -1492,6 +2600,15 @@ void mfd_update_display(MFD *m, short x0, short y0, short x1, short y1) {
 
         if ((x0 > x1) || (y0 > y1))
             return;
+
+        // Force the view rect to the full logical view size. mfd[].rect ends up
+        // normalised to a smaller box at runtime (observed 55x58 instead of
+        // 74x58, constant across modes), which left the view content not filling
+        // its box on 16:9. Re-asserting here (on the draw path) guarantees it.
+        m->rect.ul.x = (m->id == MFD_LEFT) ? MFD_VIEW_LFTX : MFD_VIEW_RGTX;
+        m->rect.ul.y = MFD_VIEW_Y;
+        m->rect.lr.x = m->rect.ul.x + MFD_VIEW_WID;
+        m->rect.lr.y = MFD_VIEW_Y + MFD_VIEW_HGT;
 
         r.ul.x = x0;
         r.ul.y = y0;
@@ -1507,8 +2624,25 @@ void mfd_update_display(MFD *m, short x0, short y0, short x1, short y1) {
         uiHideMouse(&r);
         STORE_CLIP(a, b, c, d);
         gr2ss_override = OVERRIDE_ALL;
+//        ss_safe_set_cliprect(r.ul.x, r.ul.y, r.lr.x, r.lr.y);
+//        ss_noscale_bitmap(&(pmfd_canvas->bm), m->rect.ul.x, m->rect.ul.y);
+
         ss_safe_set_cliprect(r.ul.x, r.ul.y, r.lr.x, r.lr.y);
-        ss_noscale_bitmap(&(pmfd_canvas->bm), m->rect.ul.x, m->rect.ul.y);
+        if (full_game_3d) {
+            ss_scale_bitmap(&(pmfd_canvas->bm),
+                            m->rect.ul.x, m->rect.ul.y,
+                            m->rect.lr.x - m->rect.ul.x,
+                            m->rect.lr.y - m->rect.ul.y);
+        } else {
+            // Scale the view canvas into the logical view rect (SCONV maps both)
+            // instead of blitting 1:1 -- a 1:1 blit left the window at the
+            // canvas's own size, not filling its box, so the view looked wrong
+            // and its graphics got clipped.
+            ss_scale_bitmap(&(pmfd_canvas->bm),
+                            m->rect.ul.x, m->rect.ul.y,
+                            m->rect.lr.x - m->rect.ul.x,
+                            m->rect.lr.y - m->rect.ul.y);
+        }
 
         gr2ss_override = old_over;
         uiShowMouse(&r);

@@ -45,6 +45,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 // Prototypes
 errtype render_run(void);
+void render_world_force(void); // repaint the world even if the view is obscured
 
 // Globals
 extern LGRect *rendrect;

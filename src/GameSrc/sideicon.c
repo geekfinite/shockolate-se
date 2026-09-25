@@ -69,6 +69,23 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define FLASH_RATE          256
 #define MAX_FLASH_COUNT     12
 
+// The two halves of the icon column. These are created once in
+// screen_init_side_icons() and then kept in sync with side_icons[i].r by
+// side_icon_rebuild_regions() (called on every fullscreen entry and on every
+// HUD-scale change). The regions must be moved/resized, not just their
+// underlying rects recomputed, because uiInstallRegionHandler snapshots the
+// rect at install time.
+static LGRegion *side_left_region  = NULL;
+static LGRegion *side_right_region = NULL;
+
+// Real-pixel rects for the fullscreen draw (the draw maps block-logical -> real
+// by *k, so these are passed as real/k). Kept separate from side_icons[].r so
+// the 320x200 logical round-trip (needed for the regions/mouse) cannot distort
+// the drawn icon size -- side icons must stay exactly square. Filled by
+// init_all_side_icons(); only meaningful in fullscreen.
+static short side_icon_real[NUM_SIDE_ICONS][4]; // ul.x, ul.y, lr.x, lr.y
+
+
 // ----------------
 // Local Prototypes
 // ----------------
@@ -153,25 +170,85 @@ void side_icon_language_change(void) {
 
 void init_all_side_icons() {
     int i;
+    extern uchar full_game_3d;
+    extern float hud_scale_factor(void); // newmfd.c
 
-    // Now, figure out on-screen locations
-
-    for (i = 0; i < (NUM_SIDE_ICONS / 2); i++) // left side first
-    {
-        side_icons[i].r.ul.x = SIDE_ICONS_LEFT_X;
-        side_icons[i].r.ul.y = SIDE_ICONS_TOP_Y + (i * (SIDE_ICONS_HEIGHT + SIDE_ICONS_VSPACE));
-
-        side_icons[i].r.lr.x = side_icons[i].r.ul.x + SIDE_ICONS_WIDTH;
-        side_icons[i].r.lr.y = side_icons[i].r.ul.y + SIDE_ICONS_HEIGHT;
+    // Non-fullscreen: the classic 320x200 layout, verbatim (k == 1), so the
+    // in-game screen is pixel-identical to the original.
+    if (!full_game_3d) {
+        for (i = 0; i < (NUM_SIDE_ICONS / 2); i++) {
+            side_icons[i].r.ul.x = SIDE_ICONS_LEFT_X;
+            side_icons[i].r.ul.y = (short)(SIDE_ICONS_TOP_Y + i * (SIDE_ICONS_HEIGHT + SIDE_ICONS_VSPACE));
+            side_icons[i].r.lr.x = (short)(side_icons[i].r.ul.x + SIDE_ICONS_WIDTH);
+            side_icons[i].r.lr.y = (short)(side_icons[i].r.ul.y + SIDE_ICONS_HEIGHT);
+        }
+        for (i = (NUM_SIDE_ICONS / 2); i < NUM_SIDE_ICONS; i++) {
+            side_icons[i].r.lr.x = (short)(SIDE_ICONS_RIGHT_X + SIDE_ICONS_WIDTH);
+            side_icons[i].r.ul.x = (short)(side_icons[i].r.lr.x - SIDE_ICONS_WIDTH);
+            side_icons[i].r.ul.y = side_icons[i - (NUM_SIDE_ICONS / 2)].r.ul.y;
+            side_icons[i].r.lr.y = (short)(side_icons[i].r.ul.y + SIDE_ICONS_HEIGHT);
+        }
+        return;
     }
 
-    for (i = (NUM_SIDE_ICONS / 2); i < NUM_SIDE_ICONS; i++) // now right side
+    // Fullscreen: lay the icons out in REAL pixels from the framebuffer size
+    // and the HUD tier k -- a SINGLE isotropic scale on both axes, so the icons
+    // stay SQUARE at any aspect ratio (a per-axis k/sconv made them widen past
+    // 16:9, because SCONV_X/SCONV_Y diverge). The rects are then stored back in
+    // the engine's 320x200 logical space -- the space the region system and the
+    // mouse events use (see fscrn_rect in screen.c) -- so input keeps lining up;
+    // side_icon_draw_bm maps them to real px under the shared isotropic override.
     {
-        side_icons[i].r.ul.x = SIDE_ICONS_RIGHT_X;
-        side_icons[i].r.ul.y = side_icons[i - (NUM_SIDE_ICONS / 2)].r.ul.y;
+        const int   real_w = grd_cap->w;
+        const int   real_h = grd_cap->h;
+        const float k      = hud_scale_factor();
+        extern void hud_bounds_insets(int *left, int *right); // newmfd.c
+        int bound_l = 0, bound_r = 0;
+        int kw, kh, kv, lft, rgt, top, lx, rx;
 
-        side_icons[i].r.lr.x = side_icons[i].r.ul.x + SIDE_ICONS_WIDTH;
-        side_icons[i].r.lr.y = side_icons[i].r.ul.y + SIDE_ICONS_HEIGHT;
+        if (real_w <= 0 || real_h <= 0)
+            return;
+
+        // Real-pixel geometry: square icon (WIDTH*k), row pitch, edge insets.
+        kw  = (int)(SIDE_ICONS_WIDTH  * k + 0.5f);
+        kh  = (int)(SIDE_ICONS_HEIGHT * k + 0.5f);
+        kv  = (int)((SIDE_ICONS_HEIGHT + SIDE_ICONS_VSPACE) * k + 0.5f);
+        lft = (int)(SIDE_ICONS_LEFT_X * k + 0.5f);
+        rgt = (int)((320 - SIDE_ICONS_RIGHT_X - SIDE_ICONS_WIDTH) * k + 0.5f);
+        top = (int)(SIDE_ICONS_TOP_Y * k + 0.5f);
+
+        // HUD bounds: pull each column in from its screen edge (real px).
+        hud_bounds_insets(&bound_l, &bound_r);
+        lx = lft + bound_l;             // left column left edge (real px)
+        rx = real_w - rgt - bound_r;    // right column right edge (real px)
+
+#define SICON_R2LX(px) ((short)((px) * 320.0f / (float)real_w + 0.5f))
+#define SICON_R2LY(py) ((short)((py) * 200.0f / (float)real_h + 0.5f))
+
+        for (i = 0; i < (NUM_SIDE_ICONS / 2); i++) {
+            const int ry = top + i * kv;
+            side_icon_real[i][0] = (short)lx;
+            side_icon_real[i][1] = (short)ry;
+            side_icon_real[i][2] = (short)(lx + kw);
+            side_icon_real[i][3] = (short)(ry + kh);
+            side_icons[i].r.ul.x = SICON_R2LX(lx);
+            side_icons[i].r.ul.y = SICON_R2LY(ry);
+            side_icons[i].r.lr.x = SICON_R2LX(lx + kw);
+            side_icons[i].r.lr.y = SICON_R2LY(ry + kh);
+        }
+        for (i = (NUM_SIDE_ICONS / 2); i < NUM_SIDE_ICONS; i++) {
+            const int ry = top + (i - (NUM_SIDE_ICONS / 2)) * kv;
+            side_icon_real[i][0] = (short)(rx - kw);
+            side_icon_real[i][1] = (short)ry;
+            side_icon_real[i][2] = (short)rx;
+            side_icon_real[i][3] = (short)(ry + kh);
+            side_icons[i].r.lr.x = SICON_R2LX(rx);
+            side_icons[i].r.ul.x = SICON_R2LX(rx - kw);
+            side_icons[i].r.ul.y = SICON_R2LY(ry);
+            side_icons[i].r.lr.y = SICON_R2LY(ry + kh);
+        }
+#undef SICON_R2LX
+#undef SICON_R2LY
     }
 }
 
@@ -227,29 +304,48 @@ void init_side_icon_hotkeys(void) {
 
 void screen_init_side_icons(LGRegion *root) {
     int id;
-    LGRegion *left_region, *right_region;
     LGRect r;
-    left_region = (LGRegion *)malloc(sizeof(LGRegion));
-    right_region = (LGRegion *)malloc(sizeof(LGRegion));
+    side_left_region  = (LGRegion *)malloc(sizeof(LGRegion));
+    side_right_region = (LGRegion *)malloc(sizeof(LGRegion));
 
     // Wow, having a LGRegion for each of the side icons is totally uncool
     // Let's just have two regions, and figure out from there.
 
     r.ul = side_icons[0].r.ul;
     r.lr = side_icons[(NUM_SIDE_ICONS - 1) / 2].r.lr;
-    macro_region_create_with_autodestroy(root, left_region, &r);
-    uiInstallRegionHandler(left_region, UI_EVENT_MOUSE | UI_EVENT_MOUSE_MOVE, &side_icon_mouse_callback, 0,
+    macro_region_create_with_autodestroy(root, side_left_region, &r);
+    uiInstallRegionHandler(side_left_region, UI_EVENT_MOUSE | UI_EVENT_MOUSE_MOVE, &side_icon_mouse_callback, 0,
                            &id);
-    uiSetRegionDefaultCursor(left_region, NULL);
+    uiSetRegionDefaultCursor(side_left_region, NULL);
 
     r.ul = side_icons[(NUM_SIDE_ICONS + 1) / 2].r.ul;
     r.lr = side_icons[(NUM_SIDE_ICONS - 1)].r.lr;
-    macro_region_create_with_autodestroy(root, right_region, &r);
-    uiInstallRegionHandler(right_region, UI_EVENT_MOUSE | UI_EVENT_MOUSE_MOVE, &side_icon_mouse_callback,
+    macro_region_create_with_autodestroy(root, side_right_region, &r);
+    uiInstallRegionHandler(side_right_region, UI_EVENT_MOUSE | UI_EVENT_MOUSE_MOVE, &side_icon_mouse_callback,
                            ((NUM_SIDE_ICONS + 1) / 2), &id);
-    uiSetRegionDefaultCursor(right_region, NULL);
+    uiSetRegionDefaultCursor(side_right_region, NULL);
 
     return;
+}
+
+void side_icon_rebuild_regions(void) {
+    if (!side_left_region || !side_right_region)
+        return;
+
+    LGRect r;
+
+    // Left column: top of the first icon to bottom of the last icon in the
+    // first half.
+    r.ul = side_icons[0].r.ul;
+    r.lr = side_icons[(NUM_SIDE_ICONS - 1) / 2].r.lr;
+    region_move  (side_left_region, r.ul.x, r.ul.y, 2);
+    region_resize(side_left_region, r.lr.x - r.ul.x, r.lr.y - r.ul.y);
+
+    // Right column: same, second half.
+    r.ul = side_icons[(NUM_SIDE_ICONS + 1) / 2].r.ul;
+    r.lr = side_icons[NUM_SIDE_ICONS - 1].r.lr;
+    region_move  (side_right_region, r.ul.x, r.ul.y, 2);
+    region_resize(side_right_region, r.lr.x - r.ul.x, r.lr.y - r.ul.y);
 }
 
 // =========
@@ -285,22 +381,44 @@ uchar side_icon_mouse_callback(uiEvent *e, LGRegion *r, intptr_t udata) {
 
     if (!global_fullmap->cyber && !(full_game_3d && !fullscrn_icons)) {
         int ver;
+        extern float hud_scale_factor(void); // newmfd.c
 
-        i = (int)udata + (e->pos.y - SIDE_ICONS_TOP_Y) / (SIDE_ICONS_HEIGHT + SIDE_ICONS_VSPACE);
+        // Find which icon was clicked by testing the actual drawn rects. This
+        // avoids any assumption about what coordinate space e->pos is in and
+        // which row pitch the current HUD scale implies -- if the click is
+        // inside side_icons[j].r, then j is the icon.
+	int j, start = (int)udata, end = start + (NUM_SIDE_ICONS / 2);
+        i = -1;
+        for (j = start; j < end; j++) {
+            if (RECT_TEST_PT(&side_icons[j].r, e->pos)) {
+                i = j;
+                break;
+            }
+        }
+        if (i < 0) {
+            uiSetRegionDefaultCursor(r, &globcursor);
+            last_side_icon = -1;
+            return FALSE;
+        }
+
         type = icon_data[i].waretype;
-        num = IDX_OF_TYPE(type, icon_data[i].waretrip);
-        ver = get_player_ware_version(type, num);
+        num  = IDX_OF_TYPE(type, icon_data[i].waretrip);
+        ver  = get_player_ware_version(type, num);
 
         if (!RECT_TEST_PT(&side_icons[i].r, e->pos) || ver == 0) {
             uiSetRegionDefaultCursor(r, &globcursor);
             last_side_icon = -1;
             return FALSE;
         }
+
         if (popup_cursors) {
             if (last_side_icon != i) {
                 uchar side = i * 2 / NUM_SIDE_ICONS;
                 LGCursor *c = &icon_cursor[side];
                 grs_bitmap *bm = &icon_cursor_bm[side];
+                // Offset is in the popup's NATIVE units -- make_popup_cursor
+                // converts it with the same scale as the art, so it must not be
+                // pre-scaled by k (doing that pushed the label up by ~k^2 px).
                 LGPoint offset = {0, -1};
 
                 free(bm->bits);
@@ -402,20 +520,47 @@ void side_icon_draw_bm(LGRect *r, ubyte icon, ubyte art) {
 #endif
     if (is_onscreen())
         uiHideMouse(r);
-    if (art == ICON_ART_BACKGROUND)
-        draw_raw_resource_bm(side_icon_backid, r->ul.x, r->ul.y);
-    // draw_hires_resource_bm(side_icon_backid, SCONV_X(r->ul.x), SCONV_Y(r->ul.y));
-    else
-        draw_raw_resource_bm(side_icon_bmid(icon, art), r->ul.x, r->ul.y);
-    // draw_hires_resource_bm(side_icon_bmid(icon,art), SCONV_X(r->ul.x), SCONV_Y(r->ul.y));
+
+    if (full_game_3d) {
+        Ref ref = (art == ICON_ART_BACKGROUND) ? side_icon_backid : side_icon_bmid(icon, art);
+        FrameDesc *f = RefLock(ref);
+        if (f) {
+            // Draw under the shared isotropic fullscreen override (the convert
+            // maps block-logical -> real by a uniform *k). Use the real-pixel
+            // rect from init_all_side_icons() and pass it as real/k, so the
+            // drawn icon is exactly square regardless of the 320x200 logical
+            // rounding the regions need. Non-fullscreen never reaches here.
+            extern void inventory_block_scale_begin(void);
+            extern void inventory_block_scale_end(void);
+            extern float hud_scale_factor(void);
+            const float k = hud_scale_factor();
+            const int rex = side_icon_real[icon][0];
+            const int rey = side_icon_real[icon][1];
+            const int rew = side_icon_real[icon][2] - side_icon_real[icon][0];
+            const int reh = side_icon_real[icon][3] - side_icon_real[icon][1];
+            const int bx = (int)(rex / k + 0.5f);
+            const int by = (int)(rey / k + 0.5f);
+            const int bw = (int)(rew / k + 0.5f);
+            const int bh = (int)(reh / k + 0.5f);
+	    f->bm.bits = (uchar *)(f+1);
+            inventory_block_scale_begin();
+            ss_scale_bitmap(&f->bm, bx, by, bw, bh);
+            inventory_block_scale_end();
+            RefUnlock(ref);
+        }
+    } else {
+        if (art == ICON_ART_BACKGROUND)
+            draw_raw_resource_bm(side_icon_backid, r->ul.x, r->ul.y);
+        else
+            draw_raw_resource_bm(side_icon_bmid(icon, art), r->ul.x, r->ul.y);
+    }
+
     if (is_onscreen())
         uiShowMouse(r);
 #ifdef SVGA_SUPPORT
     gr2ss_override = old_over;
 #endif
-    return;
 }
-
 // ---------------------------------------------------------------------------
 // side_icon_expose()
 //

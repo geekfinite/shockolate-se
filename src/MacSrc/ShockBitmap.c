@@ -81,8 +81,21 @@ void SetupOffscreenBitmaps(int width, int height) {
         return;
     }
 
-    // Point the renderer at the screen bytes
-    gScreenRowbytes = drawSurface->w;
+    // Point the renderer at the screen bytes.
+    // IMPORTANT: this must be the surface's actual row stride
+    // (drawSurface->pitch), not its logical width (drawSurface->w). SDL2
+    // pads a surface's pitch up to a multiple of 4 bytes, so for any
+    // width that isn't already a multiple of 4 (e.g. 854), pitch != w.
+    // Every piece of raw blitting code that walks the screen buffer
+    // row-by-row (BlitLargeAlign/BlitLargeAlignSkip in FrUtils.c,
+    // gr_bitmap's row stepping in bitmap.c) uses gScreenRowbytes as that
+    // per-row byte offset, so using the wrong value here made every row
+    // after the first start a couple of bytes short of where the real
+    // buffer row began -- compounding down the screen into a diagonal
+    // "skewed to the side" shear. All of the original built-in
+    // resolutions (320/640/800/1024/1280) happen to already be multiples
+    // of 4, which is why this never showed up before now.
+    gScreenRowbytes = drawSurface->pitch;
     gScreenAddress = drawSurface->pixels;
 
     grd_mode_cap.vbase = gScreenAddress;

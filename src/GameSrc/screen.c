@@ -154,6 +154,34 @@ errtype screen_init(void) {
     gr2ss_register_mode(0, 640, 400);
     gr2ss_register_mode(0, 640, 480);
     gr2ss_register_mode(0, 1024, 768);
+    // Slot 5 is reserved as a hack-mode sentinel elsewhere in the engine
+    // (see ss_set_hack_mode() in gr2ss.c) -- convert_use_mode/mode_id == 5
+    // must never correspond to a real, selectable resolution, or every
+    // ss_set_hack_mode(2, ...) call across the codebase (popups, HUD,
+    // inventory, text resources) starts firing for real. Register a
+    // harmless duplicate of the 320x200 base here purely to keep it
+    // occupying index 5, exactly matching svga_mode_data[5] in fullscrn.c.
+    gr2ss_register_mode(0, 320, 200);
+    // Slots 6-7 are also left unused: they collide with RETURN_BUTTON (6)
+    // and QUIT_BUTTON (7) in wrapper.c, which screenmode_screen_init()
+    // needs to avoid -- see the comment on svga_mode_data in fullscrn.c.
+    gr2ss_register_mode(0, 320, 200);
+    gr2ss_register_mode(0, 320, 200);
+    // Slots 8-14: the resolutions actually shown in the in-game
+    // screen-mode menu (see screenmode_screen_init() in wrapper.c),
+    // replacing slots 0-4 there without removing/renumbering them.
+    // Order must exactly match svga_mode_data[8..14] in fullscrn.c.
+    // Reads dimensions back from grd_mode_info rather than hardcoding
+    // them so that a -width/-height override (ApplyCustomResolutionArg()
+    // in Shock.c, which targets the 1920x1080 slot) is picked up if one
+    // was given before screen_init() ran.
+    gr2ss_register_mode(0, grd_mode_info[GRM_1024x768x8].w, grd_mode_info[GRM_1024x768x8].h);  // 8
+    gr2ss_register_mode(0, grd_mode_info[GRM_800x600x8].w, grd_mode_info[GRM_800x600x8].h);    // 9
+    gr2ss_register_mode(0, grd_mode_info[GRM_854x480x8].w, grd_mode_info[GRM_854x480x8].h);    // 10
+    gr2ss_register_mode(0, grd_mode_info[GRM_1280x720x8].w, grd_mode_info[GRM_1280x720x8].h);  // 11
+    gr2ss_register_mode(0, grd_mode_info[GRM_1366x768x8].w, grd_mode_info[GRM_1366x768x8].h);  // 12
+    gr2ss_register_mode(0, grd_mode_info[GRM_1600x900x8].w, grd_mode_info[GRM_1600x900x8].h);  // 13
+    gr2ss_register_mode(0, grd_mode_info[GRM_1920x1080x8].w, grd_mode_info[GRM_1920x1080x8].h); // 14
 #ifdef STEREO_SUPPORT
     if (i6d_device == I6D_VFX1) {
         Warning(("size = %d, %d!\n", i6d_ss->scr_w, i6d_ss->scr_h));
@@ -216,6 +244,7 @@ errtype screen_init(void) {
 extern void game_redrop_rad(int rad_mod);
 
 void screen_start() {
+
     extern LGRegion *pagebutton_region, *inventory_region;
 
     /*  Not yet

@@ -57,6 +57,7 @@ public:
 
 static uchar* d4x4_hufftab;
 static uchar* d4x4_colorset;
+static uint32_t d4x4_hufftab_entries; // # of 3-byte tokens in d4x4_hufftab
 
 static uchar* Draw4x4_InternalBeta(uint32_t* xtab, int b, uchar* bits, int d, uchar* mask_stream);
 static void Draw4x4_InternalAlpha(uint32_t* xtab, int b, BitstreamInfo& bitstream);
@@ -70,10 +71,11 @@ static void Draw4x4_InternalAlpha(uint32_t* xtab, int b, BitstreamInfo& bitstrea
 
 extern "C" {
 
-void Draw4x4Reset(uchar* colorset, uchar* hufftab)
+void Draw4x4Reset(uchar* colorset, uchar* hufftab, uint32_t hufftabBytes)
 {
     d4x4_hufftab = hufftab;
     d4x4_colorset = colorset;
+    d4x4_hufftab_entries = hufftabBytes / 3; // entries are 3-byte tokens
 }
 
 //
@@ -82,6 +84,10 @@ void Draw4x4Reset(uchar* colorset, uchar* hufftab)
 
 void Draw4x4(uchar* p, int width, int height)
 {
+    // No tables yet (or a bad table chunk): decoding would read a wild pointer.
+    if (d4x4_hufftab == NULL || d4x4_colorset == NULL || d4x4_hufftab_entries == 0)
+        return;
+
     uint32_t xtab[640 / 4];
 
     int cell_column;
@@ -111,7 +117,11 @@ static void Draw4x4_InternalAlpha(uint32_t* xtab, int b, BitstreamInfo& bitstrea
     while (b > 0) {
 	// Pull 12 bits from the bitstream and use it as an index into the
 	// hufftable.
-	auto const hindex = bitstream.peek(12);
+	auto hindex = bitstream.peek(12);
+	// A desynced bitstream can produce an index past the table end, and the
+	// table may be shorter than the full 4096 entries: clamp it.
+	if (hindex >= d4x4_hufftab_entries)
+	    hindex = 0;
 	uint8_t* huffptr = &d4x4_hufftab[hindex * 3];
 	uint32_t huffword = *((uint32_t*)huffptr) & 0x00FFFFFF;
 	// Bits 20-23 are the count field.

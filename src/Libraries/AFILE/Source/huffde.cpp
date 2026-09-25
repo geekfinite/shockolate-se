@@ -77,7 +77,11 @@ void HuffExpandFlashTables(uchar *pFlashTab, uint lenTab, uint *pc,
 
         //	Copy that many times into dest
 
-        while (runCount-- != 0)
+        // Bound the run to the destination: the last run of a table can be
+        // longer than the remaining space, and the original wrote the whole run
+        // regardless -- overrunning the caller's malloc'd table by up to
+        // (runCount-1)*tokSize bytes and corrupting the heap.
+        while (runCount-- != 0 && (pft + tokSize) <= (pFlashTab + lenTab))
         {
             memcpy(pft, &token, tokSize);
             pft += tokSize;

@@ -26,6 +26,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "ShockBitmap.h"
 #include "Prefs.h"
+#include "OpenGL.h"
 
 #include "amap.h"
 #include "biohelp.h"
@@ -84,9 +85,38 @@ extern uchar inp6d_stereo;
 #ifdef SVGA_SUPPORT
 grs_screen *svga_screen = NULL;
 frc *svga_render_context = NULL;
-short svga_mode_data[] = {GRM_320x200x8, GRM_320x400x8, GRM_640x400x8, GRM_640x480x8, GRM_1024x768x8, GRM_320x200x8};
-char mickey_stupid[][2] = {{16, 8}, {16, 4}, {3, 1}, {2, 1}, {3, 1}, {16, 8}};
-short mode_id = 3; // KLC - start off in 640x480 in Mac version      old -  short mode_id=0;
+// Slots 5-7 are intentionally left as exact duplicates of slot 0, matching
+// stock behavior for slot 5, and kept free for the same reason for 6-7.
+// IMPORTANT: convert_use_mode/mode_id == 5 is a reserved sentinel used
+// throughout the game (see ss_set_hack_mode() in gr2ss.c, called from
+// popups.c, hud.c, citres.c, newmfd.c, invent.c, fullscrn.c) to
+// temporarily force a different draw scale for specific elements. In
+// stock gameplay mode 5 is never actually selected, so those calls are
+// no-ops -- but if a real resolution lived at index 5, all of them would
+// fire for real and silently force popups/text/inventory to render at
+// mode 2's (640x400) scale.
+//
+// Slots 6 and 7 don't have that specific special meaning, but they DO
+// collide with RETURN_BUTTON (6) and QUIT_BUTTON (7) in wrapper.c --
+// screenmode_screen_init() uses each resolution button's own OButtons ID
+// as the mode_id it switches to (see screenmode_change()), so a menu
+// resolution can't live at an index that's also a reserved button ID
+// without one clobbering the other. Left unused here for the same
+// reason slot 5 is.
+//
+// Slots 0-7 are left exactly as stock (nothing here is removed, per the
+// "don't remove old resolutions" requirement) but are no longer what the
+// in-game screen-mode menu shows -- see screenmode_screen_init() in
+// wrapper.c, which now points at slots 8-14 below instead.
+//
+// Menu order (index 8 first/default, per the requested list):
+//   8: 1024x768   9: 800x600   10: 854x480  11: 1280x720
+//   12: 1366x768  13: 1600x900 14: 1920x1080
+short svga_mode_data[] = {GRM_320x200x8,  GRM_320x400x8,  GRM_640x400x8,   GRM_640x480x8, GRM_1024x768x8,
+                          GRM_320x200x8,  GRM_320x200x8,  GRM_320x200x8,   GRM_1024x768x8, GRM_800x600x8,
+                          GRM_854x480x8,  GRM_1280x720x8, GRM_1366x768x8,  GRM_1600x900x8, GRM_1920x1080x8};
+char mickey_stupid[][2] = {{16, 8}, {16, 4}, {3, 1}, {2, 1}, {3, 1}, {16, 8}, {16, 8}, {16, 8}, {3, 1}, {2, 1}, {2, 1}, {2, 1}, {2, 1}, {2, 1}, {2, 1}};
+short mode_id = 8; // Default to the first menu entry (1024x768). Was 3 (640x480).
 #endif
 
 #ifdef GADGET
@@ -117,6 +147,10 @@ errtype fullscreen_init(void) {
 
     // Full-screen 3d view region
     fullview_region = &fullview_region_data;
+    
+    INFO("fullscreen_init: fscrn_rect=%d,%d..%d,%d",
+     fscrn_rect.ul.x, fscrn_rect.ul.y, fscrn_rect.lr.x, fscrn_rect.lr.y);
+    
     region_create(fullroot_region, fullview_region, &fscrn_rect, 1, 0, REG_USER_CONTROLLED | AUTODESTROY_FLAG, NULL,
                   NULL, NULL, NULL);
 
@@ -157,6 +191,13 @@ errtype fullscreen_overlay() {
     fullscreen_refresh_mfd(MFD_LEFT);
     if (!game_paused)
         inv_update_fullscreen((full_visible & FULL_INVENT_MASK) != 0);
+    // Vitals, meters and side icons all draw through the shared isotropic
+    // fullscreen HUD override (inventory_block_scale_begin/end), so wrap the
+    // trio once here. Each routine also manages the override itself (they are
+    // re-entrant), which keeps their other call sites -- screen_draw(),
+    // gamewrap.c, gameloop.c -- correct as well; this outer wrap just means the
+    // whole HUD strip shares one begin/end.
+    inventory_block_scale_begin();
     if (fullscrn_vitals) {
         status_vitals_update(TRUE);
         if (!global_fullmap->cyber)
@@ -164,6 +205,7 @@ errtype fullscreen_overlay() {
     }
     if ((!global_fullmap->cyber) && (fullscrn_icons))
         side_icon_expose_all();
+    inventory_block_scale_end();
 
     // KLC   uiSetCursor();
 
@@ -258,7 +300,19 @@ void change_svga_screen_mode() {
     // KLC - we're never 320x200   amap_pixratio_set(svga_mode_data[mode_id]==GRM_320x200x8?FIX_UNIT:0);
     // amap_pixratio_set(0);
 
-    amap_pixratio_set(svga_mode_data[mode_id] == GRM_320x200x8 ? FIX_UNIT : 0);
+    // Widescreen: passing 0 here makes amap_pixratio_set() derive the automap's
+    // pixel ratio from the raw framebuffer (screen_h*11/(screen_w*8)), which
+    // collapses on wide modes (1920x1080 -> 0.77, 5120x1000 -> 0.27 vs 1.375
+    // at 4:3) and made the automap's Y scale resolution-dependent (vertically
+    // squished). The map is authored for the 320x200 5:6 pixel aspect, so
+    // derive the ratio from the PAR-corrected logical dimensions instead --
+    // constant at every resolution. 11 and 8 mirror STD_SCR_WID/STD_SCR_HGT,
+    // defined privately in amap.c.
+    {
+        fix adj_w = fix_mul(fix_make(320, 0), fix_div(fix_make(5, 0), fix_make(6, 0)));
+        amap_pixratio_set(fix_div(fix_mul(fix_make(200, 0), fix_make(11, 0)),
+                                  fix_mul(adj_w, fix_make(8, 0))));
+    }
 
     if (svga_render_context != NULL) {
         fr_free_view(svga_render_context);
@@ -325,6 +379,9 @@ void change_svga_screen_mode() {
     status_bio_update_screenmode();
     ss_set_hack_mode(2, &temp);
     inventory_update_screen_mode();
+    init_all_side_icons(); /* re-lay-out with the current HUD scale */
+    side_icon_rebuild_regions();      /* push those rects into the two live regions */
+    lean_meter_update_screen_mode(); /* ditto for the fullscreen lean meter */
     mfd_update_screen_mode();
     view360_update_screen_mode();
     ss_set_hack_mode(0, &temp);
@@ -333,11 +390,33 @@ void change_svga_screen_mode() {
     change_svga_cursors();
     // KLC	gamma_dealfunc(QUESTVAR_GET(GAMMACOR_QVAR));
     gamma_dealfunc(gShockPrefs.doGamma);
+
+    if (full_game_3d) {
+        // Re-run the complete fullscreen HUD layout for the new resolution.
+        // mfd_update_screen_mode() above only redoes the MFD geometry; without
+        // this, some HUD pieces kept the previous mode's geometry (the layout
+        // only looked right after a windowed <-> fullscreen cycle, which
+        // re-runs everything).
+        extern void mfd_set_hud_scale(short pct);
+        mfd_set_hud_scale(gShockPrefs.hudScale ? gShockPrefs.hudScale : 100);
+    }
+
     redraw_paused = TRUE;
 }
 
 void global_update_fov()
 {
+	// Re-derive the view/gathering radius for the new FOV (the viewing cone is
+	// built from it; see game_fr_reparam() in rendtool.c).
+	extern void game_fr_reparam(int is_128s, int full_scrn, int show_all);
+	game_fr_reparam(-1, 0, 0);
+
+	// Keep the OpenGL projection matrix's FOV-dependent terms in sync
+	// whenever global_fov changes. No-op (stub in OpenGL.h) when not
+	// built with USE_OPENGL, and harmless if OpenGL isn't the active
+	// renderer -- it just updates a matrix nothing reads in that case.
+	opengl_update_fov((float)global_fov);
+
 	if (full_game_3d)
 		fullscreen_start();
 	else
@@ -437,6 +516,8 @@ void fullscreen_exit() {
     if (_new_mode == -1)
         return;
     full_game_3d = FALSE;
+    init_all_side_icons();
+    side_icon_rebuild_regions();
     mfd_change_fullscreen(FALSE);
     inv_change_fullscreen(FALSE);
     player_struct.hardwarez_status[CPTRIP(FULLSCR_HARD_TRIPLE)] &= ~WARE_ON;

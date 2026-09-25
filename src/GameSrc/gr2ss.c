@@ -47,6 +47,101 @@ fix inv_convert_y[MAX_CONVERT_TYPES][MAX_USE_MODES];
 #define SVGA_CONV_NORMAL 1
 #define SVGA_CONV_SCREEN 2
 
+// ---------------------------------------------------------------------------
+// Aspect bounds (proportional bounding box)
+//
+// Temporarily maps the whole 320x200 logical coordinate space onto a
+// horizontally-centred rect of a given aspect instead of the full framebuffer
+// width. Used by full-screen 2D screens (splash, main menu, pause menu, ...)
+// so they render pillarboxed 4:3 (or the user's chosen bound aspect) on
+// widescreen while the 3D view still fills the window.
+//
+// The bound is applied in BOTH directions:
+//   * drawing  : SSX()/FSSX() add the left inset to every converted X
+//   * input    : ss_mouse_convert()/ss_point_convert() subtract it first
+// Only horizontal bounds are applied (vertical is always full-height).
+//
+// ratio <= 0  => no bound (begin() is a no-op), matching "off" semantics.
+// ---------------------------------------------------------------------------
+static uchar ss_bounds_active = FALSE; // offset currently in effect
+static short ss_bounds_left   = 0;     // real-px left inset (X translation)
+static fix   ss_bounds_saved_x    = 0; // saved convert_x for restore
+static fix   ss_bounds_saved_invx = 0; // saved inv_convert_x for restore
+
+uchar ss_bounds_is_active(void) { return ss_bounds_active; }
+short ss_bounds_left_inset(void) { return ss_bounds_left; }
+
+// Begin bounding the 320x200 logical space to a centred rect of aspect
+// `ratio` (width / height). No-op when conversion is off, a bound is already
+// active, the ratio is <= 0, or the screen is already no wider than the
+// target aspect (so 4:3 modes are untouched).
+void ss_bounds_begin(float ratio) {
+    if (ss_bounds_active || convert_use_mode == 0)
+        return;
+    if (ratio <= 0.0f)
+        return;
+    if (grd_cap == NULL)
+        return;
+
+    // Natural 320x200 display aspect (5:6 pixel aspect) is 4:3.
+    fix uy = convert_y[convert_type][convert_use_mode]; // real_h / 200
+    fix ux = fix_mul(uy, fix_div(fix_make(5, 0), fix_make(6, 0)));
+
+    // A requested aspect narrower than 4:3 shrinks X further; wider than 4:3
+    // is clamped to 4:3 (the 320x200 content can't fill wider without the very
+    // horizontal stretch this feature exists to remove).
+    if (ratio < (4.0f / 3.0f)) {
+        float k = ratio / (4.0f / 3.0f);
+        ux = (fix)((float)ux * k);
+        if (ux <= 0)
+            ux = 1;
+    }
+
+    int content_w = fix_int(fix_mul(fix_make(320, 0), ux));
+    int left = (grd_cap->w - content_w) / 2;
+    if (left <= 0)
+        return; // already no wider than the target aspect
+
+    ss_bounds_saved_x    = convert_x[convert_type][convert_use_mode];
+    ss_bounds_saved_invx = inv_convert_x[convert_type][convert_use_mode];
+    convert_x[convert_type][convert_use_mode]     = ux;
+    inv_convert_x[convert_type][convert_use_mode] = fix_div(fix_make(1, 0), ux);
+    ss_bounds_left   = (short)left;
+    ss_bounds_active = TRUE;
+}
+
+void ss_bounds_end(void) {
+    if (!ss_bounds_active)
+        return;
+    convert_x[convert_type][convert_use_mode]     = ss_bounds_saved_x;
+    inv_convert_x[convert_type][convert_use_mode] = ss_bounds_saved_invx;
+    ss_bounds_active = FALSE;
+    ss_bounds_left   = 0;
+}
+
+// Bounds-aware X translation for the abstract-2D layer (logical -> real).
+static short SSX(short x) {
+    short v = SCONV_X(x);
+    if (ss_bounds_active)
+        v = (short)(v + ss_bounds_left);
+    return v;
+}
+
+// Bounds-aware fix-point X translation (logical -> real).
+static fix FSSX(fix x) {
+    fix v = FIXCONV_X(x);
+    if (ss_bounds_active)
+        v = (fix)(v + ((fix)ss_bounds_left << 16));
+    return v;
+}
+
+// Bounds-aware inverse X translation (real -> logical).
+static short SS_INVX(short x) {
+    if (ss_bounds_active)
+        x = (short)(x - ss_bounds_left);
+    return INV_SCONV_X(x);
+}
+
 // Internal prototypes
 
 uchar perform_svga_conversion(uchar mask) {
@@ -90,26 +185,14 @@ void ss_scale_string(char *s, short x, short y) {
         return;
     }
 
+    // All screen modes use the "double" font tier, scaled to the layout
+    // (gr_scale_string below) instead of picking a per-mode tier (tall/double/
+    // mega). use_font is therefore always the double tier.
     if ((f == ttfont) || (f == mlfont)) {
-        switch (convert_use_mode) {
-        case 1:
-            if (f == ttfont)
-                use_font = RES_tallTinyTechFont;
-            break;
-        case 2:
-        case 3:
-            if (f == ttfont)
-                use_font = RES_doubleTinyTechFont;
-            else if (f == mlfont)
-                use_font = RES_doubleMediumLEDFont;
-            break;
-        case 4:
-            if (f == ttfont)
-                use_font = RES_megaTinyTechFont;
-            else if (f == mlfont)
-                use_font = RES_megaMediumLEDFont;
-            break;
-        }
+        if (f == ttfont)
+            use_font = RES_doubleTinyTechFont;
+        else if (f == mlfont)
+            use_font = RES_doubleMediumLEDFont;
 #ifdef STEREO_SUPPORT
         if ((rv == SVGA_CONV_SCREEN) && inp6d_stereo_active) {
             if (use_font == ID_NULL) {
@@ -143,8 +226,23 @@ void ss_scale_string(char *s, short x, short y) {
                 gr_string_size(s, (short *)&w, (short *)&h);
                 gr_scale_string(s, x, y, SCONV_X(w), SCONV_Y(h));
             } else {
+                // Fullscreen HUD text is drawn ISOTROPICALLY at the HUD integer
+                // tier (k x k). The block/layout scale folds the 320x200 5:6
+                // pixel aspect into X (X = k*5/6), which is right for the panel
+                // art but squishes the fonts, which are authored on square
+                // pixels. Non-fullscreen keeps the SCONV layout scale.
+                extern uchar full_game_3d;
+                extern float hud_scale_factor(void);
+                short w, h;
+                gr_string_size(s, (short *)&w, (short *)&h);
                 gr_set_font((grs_font *)ResLock(use_font));
-                gr_string(s, x, y);
+                if (full_game_3d) {
+                    int k = (int)(hud_scale_factor() + 0.5f);
+                    if (k < 1)
+                        k = 1;
+                    gr_scale_string(s, x, y, w * k, h * k);
+                } else
+                    gr_scale_string(s, x, y, SCONV_X(w), SCONV_Y(h));
             }
 #ifdef STEREO_SUPPORT
         }
@@ -162,6 +260,61 @@ void ss_scale_string(char *s, short x, short y) {
     }
 }
 
+// gr2ss.c
+// Draws text at k times its native size (k = the current integer HUD-scale
+// tier). Unlike ss_string()/ss_scale_string(), this never consults SCONV_X/Y
+// or perform_svga_conversion() -- x,y are drawn exactly where given, only
+// the glyph SIZE grows. For callers whose x,y are already correct real-pixel
+// coordinates and just want bigger, still-crisp text (the standalone
+// fullscreen automap, its map notes, and anything else outside the
+// MFD-block/HUD-overlay systems).
+void ss_isotropic_string(char *s, short x, short y) {
+    extern float hud_scale_factor(void);
+    grs_font *f = gr_get_font();
+    grs_font *ttfont = (grs_font *)ResLock(RES_tinyTechFont);
+    grs_font *mlfont = (grs_font *)ResLock(RES_mediumLEDFont);
+    Id use_font = ID_NULL;
+    int k = (int)(hud_scale_factor() + 0.5f);
+    if (k < 1) k = 1;
+
+    if (f == ttfont)      use_font = RES_doubleTinyTechFont;
+    else if (f == mlfont) use_font = RES_doubleMediumLEDFont;
+    ResUnlock(RES_tinyTechFont);
+    ResUnlock(RES_mediumLEDFont);
+
+    short w, h;
+    gr_string_size(s, &w, &h);
+    if (use_font != ID_NULL)
+        gr_set_font((grs_font *)ResLock(use_font));
+    gr_scale_string(s, x, y, w * k, h * k);
+    if (use_font != ID_NULL) {
+        ResUnlock(use_font);
+        gr_set_font(f);
+    }
+}
+
+void ss_isotropic_shadowed_string(char *s, short x, short y, uchar shadow) {
+    if (shadow && FONT_IS_MONO(gr_get_font())) {
+        extern float hud_scale_factor(void);
+        ubyte color = gr_get_fcolor();
+        int k = (int)(hud_scale_factor() + 0.5f);
+        if (k < 1) k = 1;
+        gr_set_fcolor(shadow);
+        ss_isotropic_string(s, x - k, y - k);
+        ss_isotropic_string(s, x,     y - k);
+        ss_isotropic_string(s, x + k, y - k);
+        ss_isotropic_string(s, x,     y + k);
+        ss_isotropic_string(s, x - k, y + k);
+        ss_isotropic_string(s, x + k, y + k);
+        ss_isotropic_string(s, x - k, y);
+        ss_isotropic_string(s, x + k, y);
+        gr_set_fcolor(color);
+        ss_isotropic_string(s, x, y);
+    } else {
+        ss_isotropic_string(s, x, y);
+    }
+}
+
 void ss_string(char *s, short x, short y) {
     uchar rv;
     if ((rv = perform_svga_conversion(OVERRIDE_SCALE))) {
@@ -169,18 +322,18 @@ void ss_string(char *s, short x, short y) {
         if ((rv == SVGA_CONV_SCREEN) && (inp6d_stereo_active)) {
             gr_push_canvas(i6d_ss->cf_left);
             if (convert_use_mode)
-                ss_scale_string(s, SCONV_X(x) + S_DELTA, SCONV_Y(y));
+                ss_scale_string(s, SSX(x) + S_DELTA, SCONV_Y(y));
             else
                 ss_scale_string(s, x + S_DELTA, y);
             gr_set_canvas(i6d_ss->cf_right);
             if (convert_use_mode)
-                ss_scale_string(s, SCONV_X(x) - S_DELTA, SCONV_Y(y));
+                ss_scale_string(s, SSX(x) - S_DELTA, SCONV_Y(y));
             else
                 ss_scale_string(s, x - S_DELTA, y);
             gr_pop_canvas();
         } else
 #endif
-            ss_scale_string(s, SCONV_X(x), SCONV_Y(y));
+            ss_scale_string(s, SSX(x), SCONV_Y(y));
     } else {
         gr_string(s, x, y);
     }
@@ -193,18 +346,18 @@ void ss_bitmap(grs_bitmap *bmp, short x, short y) {
         if ((rv == SVGA_CONV_SCREEN) && (inp6d_stereo_active)) {
             gr_push_canvas(i6d_ss->cf_left);
             if (convert_use_mode)
-                gr_scale_bitmap(bmp, SCONV_X(x) + S_DELTA, SCONV_Y(y), SCONV_X(bmp->w) + S_DELTA, SCONV_Y(bmp->h));
+                gr_scale_bitmap(bmp, SSX(x) + S_DELTA, SCONV_Y(y), SCONV_X(bmp->w) + S_DELTA, SCONV_Y(bmp->h));
             else
                 gr_bitmap(bmp, x + S_DELTA, y);
             gr_set_canvas(i6d_ss->cf_right);
             if (convert_use_mode)
-                gr_scale_bitmap(bmp, SCONV_X(x) - S_DELTA, SCONV_Y(y), SCONV_X(bmp->w) - S_DELTA, SCONV_Y(bmp->h));
+                gr_scale_bitmap(bmp, SSX(x) - S_DELTA, SCONV_Y(y), SCONV_X(bmp->w) - S_DELTA, SCONV_Y(bmp->h));
             else
                 gr_bitmap(bmp, x - S_DELTA, y);
             gr_pop_canvas();
         } else
 #endif
-            gr_scale_bitmap(bmp, SCONV_X(x), SCONV_Y(y), SCONV_X(bmp->w), SCONV_Y(bmp->h));
+            gr_scale_bitmap(bmp, SSX(x), SCONV_Y(y), SCONV_X(bmp->w), SCONV_Y(bmp->h));
         //      Warning(("scaling %d x %d to %d x %d\n",bmp->w,bmp->h,SCONV_X(bmp->w),SCONV_Y(bmp->h)));
     } else
         gr_bitmap(bmp, x, y);
@@ -212,7 +365,7 @@ void ss_bitmap(grs_bitmap *bmp, short x, short y) {
 
 void ss_ubitmap(grs_bitmap *bmp, short x, short y) {
     if (perform_svga_conversion(OVERRIDE_SCALE))
-        gr_scale_ubitmap(bmp, SCONV_X(x), SCONV_Y(y), SCONV_X(bmp->w), SCONV_Y(bmp->h));
+        gr_scale_ubitmap(bmp, SSX(x), SCONV_Y(y), SCONV_X(bmp->w), SCONV_Y(bmp->h));
     else
         gr_ubitmap(bmp, x, y);
 }
@@ -224,25 +377,25 @@ void ss_noscale_bitmap(grs_bitmap *bmp, short x, short y) {
         if ((rv == SVGA_CONV_SCREEN) && (inp6d_stereo_active)) {
             gr_push_canvas(i6d_ss->cf_left);
             if (convert_use_mode)
-                gr_bitmap(bmp, SCONV_X(x) + S_DELTA, SCONV_Y(y));
+                gr_bitmap(bmp, SSX(x) + S_DELTA, SCONV_Y(y));
             else
                 gr_bitmap(bmp, x + S_DELTA, y);
             gr_set_canvas(i6d_ss->cf_right);
             if (convert_use_mode)
-                gr_bitmap(bmp, SCONV_X(x) - S_DELTA, SCONV_Y(y));
+                gr_bitmap(bmp, SSX(x) - S_DELTA, SCONV_Y(y));
             else
                 gr_bitmap(bmp, x - S_DELTA, y);
             gr_pop_canvas();
         } else
 #endif
-            gr_bitmap(bmp, SCONV_X(x), SCONV_Y(y));
+            gr_bitmap(bmp, SSX(x), SCONV_Y(y));
     else
         gr_bitmap(bmp, x, y);
 }
 
 void ss_scale_bitmap(grs_bitmap *bmp, short x, short y, short w, short h) {
     if (perform_svga_conversion(OVERRIDE_SCALE))
-        gr_scale_bitmap(bmp, SCONV_X(x), SCONV_Y(y), SCONV_X(w), SCONV_Y(h));
+        gr_scale_bitmap(bmp, SSX(x), SCONV_Y(y), SCONV_X(w), SCONV_Y(h));
     else
         gr_scale_bitmap(bmp, x, y, w, h);
 }
@@ -256,19 +409,19 @@ void ss_rect(short x1, short y1, short x2, short y2) {
             gr_push_canvas(i6d_ss->cf_left);
             gr_set_fcolor(c);
             if (convert_use_mode)
-                gr_rect(SCONV_X(x1) + S_DELTA, SCONV_Y(y1), SCONV_X(x2) + S_DELTA, SCONV_Y(y2));
+                gr_rect(SSX(x1) + S_DELTA, SCONV_Y(y1), SSX(x2) + S_DELTA, SCONV_Y(y2));
             else
                 gr_rect(x1 + S_DELTA, y1, x2 + S_DELTA, y2);
             gr_set_canvas(i6d_ss->cf_right);
             gr_set_fcolor(c);
             if (convert_use_mode)
-                gr_rect(SCONV_X(x1) - S_DELTA, SCONV_Y(y1), SCONV_X(x2) - S_DELTA, SCONV_Y(y2));
+                gr_rect(SSX(x1) - S_DELTA, SCONV_Y(y1), SSX(x2) - S_DELTA, SCONV_Y(y2));
             else
                 gr_rect(x1 - S_DELTA, y1, x2 - S_DELTA, y2);
             gr_pop_canvas();
         } else
 #endif
-            gr_rect(SCONV_X(x1), SCONV_Y(y1), SCONV_X(x2), SCONV_Y(y2));
+            gr_rect(SSX(x1), SCONV_Y(y1), SSX(x2), SCONV_Y(y2));
     } else {
         gr_rect(x1, y1, x2, y2);
     }
@@ -283,19 +436,19 @@ void ss_box(short x1, short y1, short x2, short y2) {
             gr_push_canvas(i6d_ss->cf_left);
             gr_set_fcolor(c);
             if (convert_use_mode)
-                gr_box(SCONV_X(x1) + S_DELTA, SCONV_Y(y1), SCONV_X(x2) + S_DELTA, SCONV_Y(y2));
+                gr_box(SSX(x1) + S_DELTA, SCONV_Y(y1), SSX(x2) + S_DELTA, SCONV_Y(y2));
             else
                 gr_box(x1 + S_DELTA, y1, x2 + S_DELTA, y2);
             gr_set_canvas(i6d_ss->cf_right);
             gr_set_fcolor(c);
             if (convert_use_mode)
-                gr_box(SCONV_X(x1) - S_DELTA, SCONV_Y(y1), SCONV_X(x2) - S_DELTA, SCONV_Y(y2));
+                gr_box(SSX(x1) - S_DELTA, SCONV_Y(y1), SSX(x2) - S_DELTA, SCONV_Y(y2));
             else
                 gr_box(x1 - S_DELTA, y1, x2 - S_DELTA, y2);
             gr_pop_canvas();
         } else
 #endif
-            gr_box(RSCONV_X(x1), RSCONV_Y(y1), RSCONV_X(x2), RSCONV_Y(y2));
+            gr_box(RSCONV_X(x1) + ss_bounds_left, RSCONV_Y(y1), RSCONV_X(x2) + ss_bounds_left, RSCONV_Y(y2));
     } else {
         gr_box(x1, y1, x2, y2);
     }
@@ -304,7 +457,7 @@ void ss_box(short x1, short y1, short x2, short y2) {
 void ss_safe_set_cliprect(short x1, short y1, short x2, short y2) {
     if (perform_svga_conversion(OVERRIDE_CLIP)) {
         //      Warning(("setting rect (%d, %d) (%d,%d)!\n",SCONV_X(x1),SCONV_Y(y1),SCONV_X(x2),SCONV_Y(y2)));
-        safe_set_cliprect(SCONV_X(x1), SCONV_Y(y1), SCONV_X(x2), SCONV_Y(y2));
+        safe_set_cliprect(SSX(x1), SCONV_Y(y1), SSX(x2), SCONV_Y(y2));
     } else
         safe_set_cliprect(x1, y1, x2, y2);
 }
@@ -312,14 +465,14 @@ void ss_safe_set_cliprect(short x1, short y1, short x2, short y2) {
 void ss_cset_cliprect(grs_canvas *pcanv, short x, short y, short w, short h) {
     if (perform_svga_conversion(OVERRIDE_CLIP)) {
         //      Warning(("cset to %d,%d   %d, %d!\n",SCONV_X(x), SCONV_Y(y), SCONV_X(w), SCONV_Y(h)));
-        gr_cset_cliprect(pcanv, SCONV_X(x), SCONV_Y(y), SCONV_X(w), SCONV_Y(h));
+        gr_cset_cliprect(pcanv, SSX(x), SCONV_Y(y), SCONV_X(w), SCONV_Y(h));
     } else
         gr_cset_cliprect(pcanv, x, y, w, h);
 }
 
 void ss_int_line(short x1, short y1, short x2, short y2) {
     if (perform_svga_conversion(OVERRIDE_SCALE))
-        gr_int_line(SCONV_X(x1), SCONV_Y(y1), SCONV_X(x2), SCONV_Y(y2));
+        gr_int_line(SSX(x1), SCONV_Y(y1), SSX(x2), SCONV_Y(y2));
     else
         gr_int_line(x1, y1, x2, y2);
 }
@@ -329,19 +482,19 @@ void ss_thick_int_line(short x1, short y1, short x2, short y2) {
         short min_y, max_y, use_y, min_x, max_x, use_x;
         min_y = SCONV_Y(y1);
         max_y = SCONV_Y(y1 + 1);
-        min_x = SCONV_X(x1);
-        max_x = SCONV_X(x1 + 1);
+        min_x = SSX(x1);
+        max_x = SSX((short)(x1 + 1));
         for (use_y = min_y; use_y < max_y; use_y++)
-            gr_int_line(SCONV_X(x1), use_y, SCONV_X(x2), SCONV_Y(y2) + use_y - min_y);
+            gr_int_line(SSX(x1), use_y, SSX(x2), SCONV_Y(y2) + use_y - min_y);
         for (use_x = min_x; use_x < max_x; use_x++)
-            gr_int_line(use_x, SCONV_Y(y1), SCONV_X(x2) + use_x - min_x, SCONV_Y(y2));
+            gr_int_line(use_x, SCONV_Y(y1), SSX(x2) + use_x - min_x, SCONV_Y(y2));
     } else
         gr_int_line(x1, y1, x2, y2);
 }
 
 void ss_int_disk(short x1, short y1, short diam) {
     if (perform_svga_conversion(OVERRIDE_SCALE))
-        gr_int_disk(SCONV_X(x1), SCONV_Y(y1), SCONV_X(diam) >> 1);
+        gr_int_disk(SSX(x1), SCONV_Y(y1), SCONV_X(diam) >> 1);
     // Hm, should we convert rad?
     // Yes, but sadly it's hosed in 320x400 mode, where
     // we need to draw an ellipse.  This stuff really
@@ -352,21 +505,21 @@ void ss_int_disk(short x1, short y1, short diam) {
 
 void ss_vline(short x1, short y1, short y2) {
     if (perform_svga_conversion(OVERRIDE_SCALE))
-        gr_vline(SCONV_X(x1), SCONV_Y(y1), SCONV_Y(y2));
+        gr_vline(SSX(x1), SCONV_Y(y1), SCONV_Y(y2));
     else
         gr_vline(x1, y1, y2);
 }
 
 void ss_hline(short x1, short y1, short x2) {
     if (perform_svga_conversion(OVERRIDE_SCALE))
-        gr_hline(SCONV_X(x1), SCONV_Y(y1), SCONV_X(x2));
+        gr_hline(SSX(x1), SCONV_Y(y1), SSX(x2));
     else
         gr_hline(x1, y1, x2);
 }
 
 void ss_fix_line(fix x1, fix y1, fix x2, fix y2) {
     if (perform_svga_conversion(OVERRIDE_SCALE))
-        gr_fix_line(FIXCONV_X(x1), FIXCONV_Y(y1), FIXCONV_X(x2), FIXCONV_Y(y2));
+        gr_fix_line(FSSX(x1), FIXCONV_Y(y1), FSSX(x2), FIXCONV_Y(y2));
     else
         gr_fix_line(x1, y1, x2, y2);
 }
@@ -376,26 +529,26 @@ void ss_thick_fix_line(fix x1, fix y1, fix x2, fix y2) {
         fix min_y, max_y, use_y, min_x, max_x, use_x;
         min_y = FIXCONV_Y(y1);
         max_y = FIXCONV_Y(y1 + FIX_UNIT);
-        min_x = FIXCONV_X(x1);
-        max_x = FIXCONV_X(x1 + FIX_UNIT);
+        min_x = FSSX(x1);
+        max_x = FSSX(x1 + FIX_UNIT);
         for (use_y = min_y; use_y < max_y; use_y = use_y + FIX_UNIT)
-            gr_fix_line(FIXCONV_X(x1), use_y, FIXCONV_X(x2), FIXCONV_Y(y2) + use_y - min_y);
+            gr_fix_line(FSSX(x1), use_y, FSSX(x2), FIXCONV_Y(y2) + use_y - min_y);
         for (use_x = min_x; use_x < max_x; use_x = use_x + FIX_UNIT)
-            gr_fix_line(use_x, FIXCONV_Y(y1), FIXCONV_X(x2) + use_x - min_x, FIXCONV_Y(y2));
+            gr_fix_line(use_x, FIXCONV_Y(y1), FSSX(x2) + use_x - min_x, FIXCONV_Y(y2));
     } else
         gr_fix_line(x1, y1, x2, y2);
 }
 
 void ss_get_bitmap(grs_bitmap *bmp, short x, short y) {
     if (perform_svga_conversion(OVERRIDE_GET_BM))
-        gr_get_bitmap(bmp, SCONV_X(x), SCONV_Y(y));
+        gr_get_bitmap(bmp, SSX(x), SCONV_Y(y));
     else
         gr_get_bitmap(bmp, x, y);
 }
 
 void ss_set_pixel(long color, short x, short y) {
     if (perform_svga_conversion(OVERRIDE_SCALE))
-        gr_set_pixel(color, SCONV_X(x), SCONV_Y(y));
+        gr_set_pixel(color, SSX(x), SCONV_Y(y));
     else
         gr_set_pixel(color, x, y);
 }
@@ -404,14 +557,14 @@ void ss_set_thick_pixel(long color, short x, short y) {
     if (perform_svga_conversion(OVERRIDE_SCALE)) {
         //      gr_set_pixel(color, SCONV_X(x), SCONV_Y(y));
         gr_set_fcolor(color);
-        gr_box(SCONV_X(x), SCONV_Y(y), SCONV_X(x + 1) - 1, SCONV_Y(y + 1) - 1);
+        gr_box(SSX(x), SCONV_Y(y), SSX((short)(x + 1)) - 1, SCONV_Y(y + 1) - 1);
     } else
         gr_set_pixel(color, x, y);
 }
 
 void ss_clut_ubitmap(grs_bitmap *bmp, short x, short y, uchar *cl) {
     if (perform_svga_conversion(OVERRIDE_SCALE))
-        gr_clut_scale_ubitmap(bmp, SCONV_X(x), SCONV_Y(y), SCONV_X(bmp->w), SCONV_Y(bmp->h), cl);
+        gr_clut_scale_ubitmap(bmp, SSX(x), SCONV_Y(y), SCONV_X(bmp->w), SCONV_Y(bmp->h), cl);
     else
         gr_clut_ubitmap(bmp, x, y, cl);
 }
@@ -460,10 +613,10 @@ void ss_point_convert(short *px, short *py, uchar down) {
         ox = *px;
         oy = *py;
         if (down) {
-            *px = INV_SCONV_X(*px);
+            *px = SS_INVX(*px);
             *py = INV_SCONV_Y(*py);
         } else {
-            *px = SCONV_X(*px);
+            *px = SSX(*px);
             *py = SCONV_Y(*py);
         }
         //      Warning(("%d >> %d %d --> %d %d\n",down,ox,oy,*px,*py));
@@ -527,10 +680,10 @@ void ss_mouse_convert(short *px, short *py, uchar down) {
 #endif
 
         if (down) {
-            *px = INV_SCONV_X(*px);
+            *px = SS_INVX(*px);
             *py = INV_SCONV_Y(*py);
         } else {
-            *px = SCONV_X(*px);
+            *px = SSX(*px);
             *py = SCONV_Y(*py);
         }
     }
@@ -549,10 +702,10 @@ void ss_mouse_convert_round(short *px, short *py, uchar down) {
         ox = *px;
         oy = *py;
         if (down) {
-            *px = fix_int(INV_FIXCONV_X(fix_make(*px, 0x8000)));
+            *px = (short)fix_int(INV_FIXCONV_X(fix_make(*px - ss_bounds_left, 0x8000)));
             *py = fix_int(INV_FIXCONV_Y(fix_make(*py, 0x8000)));
         } else {
-            *px = fix_int(FIXCONV_X(fix_make(*px, 0x8000)));
+            *px = (short)(fix_int(FIXCONV_X(fix_make(*px, 0x8000))) + ss_bounds_left);
             *py = fix_int(FIXCONV_Y(fix_make(*py, 0x8000)));
         }
     }

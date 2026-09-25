@@ -76,6 +76,9 @@ grs_bitmap obj_bitmap_pool[OBJ_BITMAP_POOL_SIZE];
 uchar svga_cursor_bits[SVGA_CURSOR_WIDTH * SVGA_CURSOR_HEIGHT];
 grs_bitmap svga_cursor_bmp;
 
-#define MAX_OPT_WID 154
-#define MAX_OPT_HT 58
-uchar svga_options_cursor_bits[MAX_OPT_WID * MAX_OPT_HT];
+//#define MAX_OPT_WID 154
+//#define MAX_OPT_HT 58
+//uchar svga_options_cursor_bits[MAX_OPT_WID * MAX_OPT_HT];
+
+uchar *svga_options_cursor_bits = NULL;
+size_t svga_options_cursor_bits_size = 0;

@@ -115,6 +115,119 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 errtype draw_status_arrow(int x_coord, int y);
 void draw_status_bar(ushort x0, ushort x1, ushort cutoff, ushort y);
 
+extern uchar full_game_3d;
+
+// ---------------------------------------------------------------------------
+// Widescreen anchoring for the upper-right health / energy readout
+//
+// The readout (bar backing, bars, status icons) was authored for the fixed
+// 320x200 screen and is drawn through ss_bitmap(), i.e. stretched by SCONV_X.
+// Its rightmost art sits at (STATUS_ICON_X + icon width), which was tuned to
+// land on the logical x==320 edge exactly. On a widescreen mode SCONV_X maps
+// 320 onto the real right edge as well, so the icons end up flush against --
+// and, because they are drawn past the nominal
+// STATUS_VITALS_X+STATUS_VITALS_WIDTH extent, slightly over -- the real screen
+// border, where they get clipped.
+//
+// Pull the whole readout in so its rightmost art keeps a fixed *real-pixel*
+// inset from the right edge, at any resolution. The inset is converted to
+// logical units with the inverse of the very SCONV_X that will be re-applied
+// at draw time, so the on-screen inset is exact regardless of mode.
+// ---------------------------------------------------------------------------
+// Left edge (logical) of the status icons; the readout's right edge is
+// STATUS_ICON_X + icon width. Declared here (instead of next to
+// status_vitals_update() below) because vitals_recompute_layout() uses it.
+#define STATUS_ICON_X 307
+
+#define VITALS_RIGHT_MARGIN_REAL 8
+
+// The readout is drawn with a UNIFORM horizontal scale (its vertical scale *
+// 5:6) instead of the screen's non-uniform SCONV_X, so it isn't stretched on
+// 16:9. Same re-entrant swap as the MFD/inventory blocks.
+static fix vitals_ux       = FIX_UNIT;
+static fix vitals_ux_saved = FIX_UNIT;
+static fix vitals_uy       = FIX_UNIT;
+static fix vitals_uy_saved = FIX_UNIT;
+static int vitals_depth    = 0;
+static short vitals_dx = 0; // logical-px shift applied to the whole readout
+
+// Logical x of a readout element after right-anchoring.
+#define VITALS_ANCHOR_X(lx) ((lx) + vitals_dx)
+
+static void vitals_block_scale_begin(void) {
+    if (!full_game_3d)
+        return;
+    if (vitals_depth++ == 0) {
+        vitals_ux_saved = convert_x[convert_type][convert_use_mode];
+        vitals_uy_saved = convert_y[convert_type][convert_use_mode];
+        convert_x[convert_type][convert_use_mode] = vitals_ux;
+        convert_y[convert_type][convert_use_mode] = vitals_uy;
+    }
+}
+
+static void vitals_block_scale_end(void) {
+    if (vitals_depth <= 0)
+        return;
+    if (--vitals_depth == 0) {
+        convert_x[convert_type][convert_use_mode] = vitals_ux_saved;
+        convert_y[convert_type][convert_use_mode] = vitals_uy_saved;
+    }
+}
+
+static void vitals_recompute_layout(void) {
+    vitals_ux = convert_x[convert_type][convert_use_mode];
+    vitals_dx = 0;
+
+    // Only the fullscreen HUD is affected; the 320x200 game screen keeps the
+    // classic layout verbatim.
+    if (!full_game_3d)
+        return;
+
+    {
+        int scr_w = grd_cap->w;
+        int scr_h = grd_cap->h;
+        // Real px per logical unit, uniform (vertical scale, 5:6 pixel aspect).
+        extern float hud_scale_factor(void); // fullscreen HUD scale (newmfd.c)
+        float sx;
+        int icon_w;
+        int right_logical;
+
+        if (scr_w <= 0 || scr_h <= 0)
+            return;
+        {
+            // HUD scale: uniform, edge-anchored (the readout keeps its right
+            // margin; right_logical below re-derives the position from sx).
+            const float k  = hud_scale_factor();
+            const fix   kf = (fix)(k * 65536.0f);
+            // Fully isotropic (no 5:6 X fold): the readout, its bars and its
+            // string-derived boxes all share the one uniform HUD tier, so text
+            // boxes stay square at any aspect ratio (same as inventory / MFD).
+            // vitals_block_scale_begin swaps BOTH converters to this.
+	    sx = k;
+	    vitals_ux = kf;
+	    vitals_uy = kf;
+        }
+
+        // Width of the rightmost icon (the readout's right edge is icon-anchored,
+        // not STATUS_VITALS_X+STATUS_VITALS_WIDTH).
+        icon_w = res_bm_width(global_fullmap->cyber ? REF_IMG_bmCyberIcon1 : REF_IMG_bmHealthIcon1);
+
+        // Put the readout's right edge VITALS_RIGHT_MARGIN_REAL px inside the
+        // real right edge, in the uniform scale.
+        right_logical = (int)(((float)scr_w - VITALS_RIGHT_MARGIN_REAL) / sx + 0.5f);
+        vitals_dx = (short)(right_logical - (STATUS_ICON_X + icon_w));
+
+        // HUD bounds: pull the readout in from the right edge by the bounded
+        // rect's inset (real px -> this block's uniform logical units).
+        {
+            int bound_l, bound_r;
+            extern void hud_bounds_insets(int *left, int *right); // newmfd.c
+            hud_bounds_insets(&bound_l, &bound_r);
+            vitals_dx -= (short)((float)bound_r / sx + 0.5f);
+        }
+    }
+}
+
 // ===========================================================================
 // ======================= * UPPER RIGHT HAND CORNER STUFF * =================
 // ======================= *        STARTS HERE            * =================
@@ -134,9 +247,14 @@ void status_vitals_init() {
     // Draw the background map
     //   draw_res_bm(STATUS_RES_VITALSID, STATUS_VITALS_X, STATUS_VITALS_Y);
 
-    // Draw the innards
-    draw_res_bm(STATUS_RES_HEALTH_ID, STATUS_VITALS_X_BASE, STATUS_VITALS_Y_TOP);
-    draw_res_bm(STATUS_RES_ENERGY_ID, STATUS_VITALS_X_BASE, STATUS_VITALS_Y_BOTTOM);
+    // Anchor the readout to the current resolution before drawing its innards.
+    vitals_recompute_layout();
+
+    // Draw the innards (uniform scale, so they aren't stretched on 16:9).
+    vitals_block_scale_begin();
+    draw_res_bm(STATUS_RES_HEALTH_ID, VITALS_ANCHOR_X(STATUS_VITALS_X_BASE), STATUS_VITALS_Y_TOP);
+    draw_res_bm(STATUS_RES_ENERGY_ID, VITALS_ANCHOR_X(STATUS_VITALS_X_BASE), STATUS_VITALS_Y_BOTTOM);
+    vitals_block_scale_end();
     // draw_hires_resource_bm(STATUS_RES_HEALTH_ID, 372, 3);
     // draw_hires_resource_bm(STATUS_RES_ENERGY_ID, 372, 27);
     return;
@@ -162,8 +280,6 @@ void status_vitals_end() {
     // in the upper right hand corner of the screen need to be changed.
     //
 
-#define STATUS_ICON_X 307
-
 errtype status_vitals_update(uchar Full_Redraw) {
     static short last_health_x = 0;
     static short last_energy_x = 0;
@@ -175,6 +291,23 @@ errtype status_vitals_update(uchar Full_Redraw) {
     ushort minx, maxx;
     //   static long last_time=0L;
     //   long delta;
+
+    vitals_recompute_layout();
+
+    // Draw with the block's uniform scale so the readout isn't stretched on 16:9.
+    vitals_block_scale_begin();
+
+    // The innards art is init-only; redraw it whenever the screen size changes.
+    {
+        static int last_cap_w = -1, last_cap_h = -1;
+        if (grd_cap->w != last_cap_w || grd_cap->h != last_cap_h) {
+            last_cap_w = grd_cap->w;
+            last_cap_h = grd_cap->h;
+            draw_res_bm(STATUS_RES_HEALTH_ID, VITALS_ANCHOR_X(STATUS_VITALS_X_BASE), STATUS_VITALS_Y_TOP);
+            draw_res_bm(STATUS_RES_ENERGY_ID, VITALS_ANCHOR_X(STATUS_VITALS_X_BASE), STATUS_VITALS_Y_BOTTOM);
+            Full_Redraw = TRUE;
+        }
+    }
 
     if (global_fullmap->cyber)
         health_value = player_struct.cspace_hp;
@@ -208,7 +341,7 @@ errtype status_vitals_update(uchar Full_Redraw) {
         draw_status_bar(minx, maxx, health_x, STATUS_VITALS_Y_TOP);
         ref = ((global_fullmap->cyber) ? REF_IMG_bmCyberIcon1 : REF_IMG_bmHealthIcon1) + (health_x / 8);
         icon_bmp = lock_bitmap_from_ref(ref);
-        ss_bitmap(icon_bmp, STATUS_ICON_X, STATUS_VITALS_Y_TOP);
+        ss_bitmap(icon_bmp, VITALS_ANCHOR_X(STATUS_ICON_X), STATUS_VITALS_Y_TOP);
         // gr_bitmap(icon_bmp, SCONV_X(STATUS_ICON_X), SCONV_Y(STATUS_VITALS_Y_TOP));
         RefUnlock(ref);
 
@@ -227,13 +360,15 @@ errtype status_vitals_update(uchar Full_Redraw) {
             draw_status_bar(minx, maxx, energy_x, STATUS_VITALS_Y_BOTTOM + 1);
             ref = REF_IMG_bmEnergyIcon1 + (energy_x / 8);
             icon_bmp = lock_bitmap_from_ref(ref);
-            ss_bitmap(icon_bmp, STATUS_ICON_X, STATUS_VITALS_Y_BOTTOM);
+            ss_bitmap(icon_bmp, VITALS_ANCHOR_X(STATUS_ICON_X), STATUS_VITALS_Y_BOTTOM);
             // gr_bitmap(icon_bmp, SCONV_X(STATUS_ICON_X), SCONV_Y(STATUS_VITALS_Y_BOTTOM));
             RefUnlock(ref);
 
             last_energy_x = energy_x;
         }
     }
+
+    vitals_block_scale_end();
 
     return (OK);
 }
@@ -256,7 +391,7 @@ errtype draw_status_arrow(int x_coord, int y) {
         index = 1;
     else
         index = 2;
-    ss_bitmap(&status_arrows[index], STATUS_VITALS_X_BASE + (x_coord * STATUS_ANGLE_SIZE), y);
+    ss_bitmap(&status_arrows[index], VITALS_ANCHOR_X(STATUS_VITALS_X_BASE) + (x_coord * STATUS_ANGLE_SIZE), y);
     // gr_bitmap(&status_arrows[index],
     //					SCONV_X(STATUS_VITALS_X_BASE + (x_coord * STATUS_ANGLE_SIZE)),
     //					SCONV_Y(y));
@@ -273,8 +408,8 @@ void draw_status_bar(ushort x0, ushort x1, ushort cutoff, ushort y) {
     int i;
     LGRect r;
 
-    r.ul = MakePoint(STATUS_VITALS_X_BASE + (x0 * STATUS_ANGLE_SIZE), y);
-    r.lr = MakePoint(STATUS_VITALS_X_BASE + (x1 * STATUS_ANGLE_SIZE), y + status_arrows[0].h);
+    r.ul = MakePoint(VITALS_ANCHOR_X(STATUS_VITALS_X_BASE) + (x0 * STATUS_ANGLE_SIZE), y);
+    r.lr = MakePoint(VITALS_ANCHOR_X(STATUS_VITALS_X_BASE) + (x1 * STATUS_ANGLE_SIZE), y + status_arrows[0].h);
 
     uiHideMouse(&r);
     //   mprintf ("draw_bar x0=%d x1=%d cutoff = %d\n",x0,x1,cutoff);

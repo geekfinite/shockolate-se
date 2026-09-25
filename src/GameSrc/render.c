@@ -118,6 +118,9 @@ errtype init_hack_cameras() {
     uchar *tmp_mem;
 
     static_bitmap = gr_alloc_bitmap(BMT_FLAT8, 0, STATIC_WIDTH, STATIC_HEIGHT);
+// DeepSeek fixing surveillance camera screen
+    if (static_bitmap == NULL)
+        WARN("%s: gr_alloc_bitmap returned NULL for static_bitmap!", __FUNCTION__);
     gr_make_canvas(static_bitmap, &static_canvas);
     gr_push_canvas(&static_canvas);
     gr_clear(0);
@@ -324,12 +327,12 @@ void tile_hit(int mx, int my) {
 
 #define LIFE_UPDATE_RATE (256 >> 2)
 
-errtype render_run(void) {
+static errtype render_world(uchar force) {
     extern uchar view360_render_on;
     static long last_cspace_update = 0;
 
 #ifdef POPUPS_ALLOWED
-    if (region_obscured(mainview_region, mainview_region->r) == UNOBSCURED)
+    if (force || region_obscured(mainview_region, mainview_region->r) == UNOBSCURED)
 #endif
     {
         // printf("render_run_start\n");
@@ -351,3 +354,12 @@ errtype render_run(void) {
     }
     return OK;
 }
+
+errtype render_run(void) { return render_world(FALSE); }
+
+// Repaint the world view ignoring the "view obscured" early-out. The pause
+// menu uses this when it changes the HUD layout: the HUD's previous footprint
+// sits on the frozen frame and must be erased before the new HUD is drawn, but
+// the early-out above skips the whole render while the menu covers the view.
+// Redraw only -- no game state advances.
+void render_world_force(void) { render_world(TRUE); }

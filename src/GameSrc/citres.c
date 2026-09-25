@@ -152,6 +152,8 @@ errtype simple_load_res_bitmap(grs_bitmap *bmp, Ref rid) { return load_res_bitma
 
 errtype load_res_bitmap_cursor(LGCursor *c, grs_bitmap *bmp, Ref rid, uchar alloc) {
     errtype retval = OK;
+    extern float hud_scale_factor(void);
+    extern uchar full_game_3d;
     LGRect anchor;
 
 #ifdef SVGA_SUPPORT
@@ -165,30 +167,60 @@ errtype load_res_bitmap_cursor(LGCursor *c, grs_bitmap *bmp, Ref rid, uchar allo
 
     gr2ss_override = OVERRIDE_ALL;
     master_load_bitmap_from_res(&temp_bmp, REFID(rid), REFINDEX(rid), &anchor, NULL);
-    w = temp_bmp.w;
-    h = temp_bmp.h;
-    ss_point_convert(&w, &h, FALSE);
+
+    // Cursor on-screen size depends on which UI context we're in:
+    //  - fullscreen: 1x = 1 source pixel, same convention as the scaled HUD.
+    //    Multiply source size by hud_scale_factor(); do NOT apply SCONV
+    //    (that would double-apply the scale).
+    //  - non-fullscreen (main menu, options): the surrounding UI is drawn
+    //    in 320x200 logical space and SCONV'd up, so the cursor needs the
+    //    same SCONV treatment to match. hud_scale_factor() plays no part.
+    extern float hud_scale_factor(void);
+    extern uchar full_game_3d;
+    float k = full_game_3d ? hud_scale_factor() : 1.0f;
+
+    if (full_game_3d) {
+        w = (short)(temp_bmp.w * k + 0.5f);
+        h = (short)(temp_bmp.h * k + 0.5f);
+    } else {
+        // Non-fullscreen (front-end): uniform, modest fixed scale. SCONV
+        // stretched it on widescreen, and a full resolution-relative scale was
+        // far too large against the 4:3 front-end UI -- 2.5x reads right.
+        w = (short)(temp_bmp.w * 2.5f + 0.5f);
+        h = (short)(temp_bmp.h * 2.5f + 0.5f);
+    }
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+
     if (alloc)
         bits = (uchar *)malloc(sizeof(char) * w * h);
     else
         bits = bmp->bits;
     if (temp_bmp.bits == NULL)
         critical_error(CRITERR_MEM | 5);
+
     gr_init_bm(bmp, bits, BMT_FLAT8, BMF_TRANS, w, h);
     gr_make_canvas(bmp, &temp_canv);
+
     gr_push_canvas(&temp_canv);
     gr_clear(0);
-    ss_bitmap(&temp_bmp, 0, 0);
+    gr_scale_bitmap(&temp_bmp, 0, 0, w, h);
     free(temp_bmp.bits);
-    if (convert_use_mode) {
-        anchor.ul.x = (SCONV_X(anchor.ul.x) + SCONV_X(anchor.ul.x + 1)) / 2;
-        anchor.ul.y = (SCONV_Y(anchor.ul.y) + SCONV_Y(anchor.ul.y + 1)) / 2;
+
+    // Anchor (hotspot) follows the same rule as the size.
+    if (full_game_3d) {
+        anchor.ul.x = (short)(anchor.ul.x * k + 0.5f);
+        anchor.ul.y = (short)(anchor.ul.y * k + 0.5f);
+    } else if (convert_use_mode) {
+        anchor.ul.x = (short)(anchor.ul.x * 2.5f + 0.5f);
+        anchor.ul.y = (short)(anchor.ul.y * 2.5f + 0.5f);
     }
-    //   gr_set_pixel(34,anchor.ul.x,anchor.ul.y);  // test test test
+
     gr_pop_canvas();
     retval = uiMakeBitmapCursor(c, bmp, anchor.ul);
     ss_set_hack_mode(0, &temp);
     gr2ss_override = old_over;
+
 #else
     retval = master_load_bitmap_from_res(bmp, REFID(rid), REFINDEX(rid),
                                          &anchor, (alloc) ? NULL : bmp->bits);

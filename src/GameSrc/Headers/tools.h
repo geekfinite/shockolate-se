@@ -65,6 +65,7 @@ errtype draw_raw_res_bm_temp(Ref id, int x, int y);
 void draw_hires_resource_bm(Ref id, int x, int y);
 void draw_hires_halfsize_bm(Ref id, int x, int y);
 errtype draw_res_bm(Ref id, int x, int y);
+errtype draw_res_bm_iscale(Ref id, int x, int y, int k);
 errtype draw_res_bm_core(Ref id, int x, int y, uchar scale);
 errtype draw_full_res_bm(Ref id, int x, int y, uchar fade_in);
 

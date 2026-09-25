@@ -203,4 +203,8 @@ extern uchar Flash;
 #define macro_region_create(parent, child, rect) \
     region_create(parent, child, rect, 0, 0, REG_USER_CONTROLLED, NULL, NULL, NULL, NULL)
 
+// Maps an event positioned in fullview_region's 320x200 space into the
+// MFD view's 74x58 canvas space using the drawn (real-pixel) view rect.
+void mfd_view_event_to_canvas(MFD *m, uiEvent *e);
+
 #endif // __MFDINT_H

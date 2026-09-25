@@ -504,6 +504,13 @@ void PreloadGameResources(void) {
     ResLock(RES_doubleTinyTechFont);
     ResLock(RES_citadelFont);
     ResLock(RES_mediumLEDFont);
+    // The "mega" tier used to be a rare case (only the stock 1024x768
+    // mode used it); with the redone screen-mode menu it's now the
+    // default for most entries (see gr2ss.c's ss_scale_string), so
+    // worth warming the cache for it here too rather than taking the
+    // one-time load hit on first use.
+    ResLock(RES_megaTinyTechFont);
+    ResLock(RES_megaMediumLEDFont);
 
     // Strings
     ResLock(RES_objlongnames);

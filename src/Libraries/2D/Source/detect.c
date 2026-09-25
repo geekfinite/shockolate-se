@@ -51,6 +51,23 @@ int gr_detect(grs_sys_info *info)
 	info->modes[2] = GRM_640x400x8;
 	info->modes[3] = GRM_320x200x8;
 	info->modes[4] = GRM_1024x768x8;
+	// Added for the redone screen-mode menu (see screenmode_screen_init()
+	// in wrapper.c / svga_mode_data in fullscrn.c) -- without an entry
+	// here, a mode's menu button gets dimmed via the mode_ok check in
+	// screenmode_screen_init(), even though the mode itself works fine.
+	info->modes[5] = GRM_800x600x8;
+	info->modes[6] = GRM_854x480x8;
+	info->modes[7] = GRM_1280x720x8;
+	info->modes[8] = GRM_1366x768x8;
+	info->modes[9] = GRM_1600x900x8;
+	info->modes[10] = GRM_1920x1080x8;
+	// Properly terminate the list (grs.h documents modes[] as ending with
+	// -1, and wrapper.c's mode_ok check relies on that terminator to stop
+	// scanning) -- previously left unterminated, which happened to be
+	// harmless only because every stock svga_mode_data[] entry's enum
+	// value was reachable within the first few slots checked before
+	// running into always-zero (== GRM_320x200x8) memory beyond index 4.
+	info->modes[11] = -1;
 
   grd_device_table = grd_device_table_list[info->id_maj];
   grd_canvas_table_list[BMT_DEVICE] = (void (**)())grd_device_table[GRT_CANVAS_TABLE];

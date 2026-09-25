@@ -34,6 +34,7 @@ void opengl_start_frame();
 void opengl_end_frame();
 void opengl_begin_sensaround(uchar version);
 void opengl_end_sensaround();
+void opengl_update_fov(float fov_degrees);
 
 #else
 
@@ -62,6 +63,7 @@ static void opengl_start_frame() {}
 static void opengl_end_frame() {}
 static void opengl_begin_sensaround(uchar version) {}
 static void opengl_end_sensaround() {}
+static void opengl_update_fov(float fov_degrees) {}
 
 #endif
 

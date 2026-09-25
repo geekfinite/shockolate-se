@@ -37,6 +37,7 @@ uchar eye_mouse_handler(uiEvent *ev, LGRegion *r, intptr_t);
 uchar lean_mouse_handler(uiEvent *ev, LGRegion *r, intptr_t);
 void init_posture_meters(LGRegion *root, uchar fullscreen);
 void update_lean_meter(uchar force);
+void lean_meter_update_screen_mode(void);
 void draw_eye_bitmap(grs_bitmap *eye_bmap, LGPoint pos, int lasty);
 void update_eye_meter(uchar force);
 void update_meters(uchar force);

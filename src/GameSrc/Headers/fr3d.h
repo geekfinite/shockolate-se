@@ -32,7 +32,18 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #ifndef FR3D_H
 #define FR3D_H
 
-#define FR_PT_CNT   256
+// Widescreen scenes can hold noticeably more geometry in view than the original
+// 320x200 framing, so the shared 3D point pool needs headroom. Exhausting it
+// corrupts the free list (getpnt/g3_dup_point hand out wild pointers), which is
+// what the star-field renderer was crashing on.
+//
+// Raised again for the wider aspect ratios: the pool is allocated per frame and
+// every transformed/clipped point of every visible polygon comes out of it, so a
+// wider frustum needs proportionally more. When it runs dry the renderer cannot
+// emit a polygon and the world shows HOLES. The pool is malloc()d from this
+// count (alloc.c: max_points * sizeof(g3s_point)), so raising it only costs a
+// little memory.
+#define FR_PT_CNT   4096
 #define FR_DEF_FOV 110
 #define FR_DEF_AXIS 'X'
 

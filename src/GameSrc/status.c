@@ -49,6 +49,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "gr2ss.h"
 
+#include <stdlib.h>
+
 // Defines
 #define NUM_BIO_TRACKS 8
 
@@ -151,7 +153,10 @@ typedef struct {
 
 uchar gBioInited = FALSE;
 
-uchar status_background[(DIFF_BIO_WIDTH + 4) * (DIFF_BIO_HEIGHT + 2)];
+//uchar status_background[(DIFF_BIO_WIDTH + 4) * (DIFF_BIO_HEIGHT + 2)];
+uchar *status_background = NULL;
+size_t status_background_size = 0;
+
 // uchar status_background[(266+4)*(44+2)];
 uchar bio_data_buffer[NUM_BIO_TRACKS * sizeof(bio_data_block)];
 
@@ -355,13 +360,28 @@ void status_bio_set(short bio_mode) {
     bio_background_bitmap = f->bm;
 
     // let's try to do the right thing!
-    bio_background_bitmap.bits = status_background;
+//    bio_background_bitmap.bits = status_background;
 
-    LG_memcpy(bio_background_bitmap.bits, (char *)(f + 1), sizeof(char) * f->bm.w * f->bm.h);
+//    LG_memcpy(bio_background_bitmap.bits, (char *)(f + 1), sizeof(char) * f->bm.w * f->bm.h);
+
+	size_t needed = (size_t)f->bm.w * (size_t)f->bm.h;
+	if (needed > status_background_size) {
+    		free(status_background);
+    		status_background = (uchar *)malloc(needed);
+    		status_background_size = needed;
+		}
+
+	bio_background_bitmap.bits = status_background;
+	LG_memcpy(bio_background_bitmap.bits, (char *)(f + 1), needed);
 
     bio_data = (bio_data_block *)bio_data_buffer;
-    for (i = 0; i < NUM_BIO_TRACKS; i++)
-        bio_data[i].free = TRUE;
+//    for (i = 0; i < NUM_BIO_TRACKS; i++)
+//        bio_data[i].free = TRUE;
+    for (i = 0; i < NUM_BIO_TRACKS; i++) {
+        bio_data[i].free   = TRUE;
+        bio_data[i].active = FALSE;
+        bio_data[i].data   = NULL;
+    }
 
     RefUnlock(STATUS_RESID);
     bio_funcs[curr_bio_mode]();
@@ -376,7 +396,19 @@ void status_bio_set(short bio_mode) {
 void status_bio_update_screenmode() { bio_canvas = *grd_screen_canvas; /* make copy for int routine */ }
 
 void status_bio_init(void) {
+    int i;
+
     status_bio_update_screenmode();
+
+    // Initialize bio_data so status_bio_update() is safe to call
+    // even before status_bio_set() runs.
+    bio_data = (bio_data_block *)bio_data_buffer;
+    for (i = 0; i < NUM_BIO_TRACKS; i++) {
+        bio_data[i].free   = TRUE;
+        bio_data[i].active = FALSE;
+        bio_data[i].data   = NULL;
+    }
+
 
 #ifndef TIMING_PROCEDURES_OFF
     bio_time_id = tm_add_process((void (*)())status_bio_update, 0, TMD_FREQ / 140);
@@ -445,6 +477,11 @@ errtype status_bio_add(int *var, int max_value, int update_time, int track_numbe
     bio_data_block *new_block;
     uchar value;
     int var_value;
+
+    // Reject invalid track numbers BEFORE touching the bio_data array.
+    if ((track_number < 0) || (track_number >= NUM_BIO_TRACKS))
+        return (ERR_NOEFFECT);
+
 
     if (var == NULL) // are we trying to clear out a track slot??
     {
@@ -539,6 +576,7 @@ void status_bio_update(void) {
     int i;
     int j;
     bio_data_block *curr_blk;
+    bio_data_block *bio_data = (bio_data_block *)bio_data_buffer;
     int the_head;
     long color_base;
     int draw_location;
@@ -562,7 +600,12 @@ void status_bio_update(void) {
     gr_push_state();
 #endif
     for (i = 0; i < NUM_BIO_TRACKS; i++, curr_blk++) {
-        if (curr_blk->free == FALSE) {
+	if (curr_blk->free == FALSE) {
+		if (curr_blk->data == NULL) {
+        	curr_blk->free = TRUE;
+        	curr_blk->active = FALSE;
+        	continue;
+    		}
             // We must check to see if this track should be drawn now,
             // or must it wait until it's time
             if (curr_blk->counter < curr_blk->update_time) {

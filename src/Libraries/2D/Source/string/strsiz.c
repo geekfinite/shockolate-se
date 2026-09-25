@@ -55,6 +55,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
  * @param width returned width
  * @param height returned height
  */
+// HUD isotropic-text width scale (percent). The fullscreen text layout runs in
+// the 5:6 block space (X = k*5/6) but glyphs are drawn isotropically (k*k), so
+// string-derived boxes must be 6/5 wider in X to fit. Set to 120 by
+// inventory_block_scale_begin/end; 100 everywhere else.
+short gr_string_xscale_pct = 100;
+
 void gr_font_string_size(grs_font *font, char *string, short *width, short *height) {
     short *offset_tab; /* table of character offsets */
     short offset;      /* offset of current character */
@@ -79,6 +85,7 @@ void gr_font_string_size(grs_font *font, char *string, short *width, short *heig
         w_lin += offset_tab[c - font->min + 1] - offset;
     }
     *width = (w_lin > w_str) ? w_lin : w_str;
+    *width = (short)(*width * gr_string_xscale_pct / 100);
     *height = h_str;
 }
 

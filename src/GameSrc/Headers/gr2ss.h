@@ -20,6 +20,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #ifdef SVGA_SUPPORT
 extern void ss_string(char *s, short x, short y);
+// Isotropic-text helpers: draw at the uniform HUD scale (see gr2ss.c)
+void ss_isotropic_string(char *s, short x, short y);
+void ss_isotropic_shadowed_string(char *s, short x, short y, uchar shadow);
 void ss_scale_string(char *s, short x, short y);
 extern void ss_bitmap(grs_bitmap *bmp, short x, short y);
 extern void ss_ubitmap(grs_bitmap *bmp, short x, short y);
@@ -52,8 +55,23 @@ extern short ss_curr_mode_width(void);
 extern short ss_curr_mode_height(void);
 extern void ss_set_hack_mode(short new_m, short *tval);
 
+// Aspect bounds (proportional bounding box): temporarily map the whole
+// 320x200 logical space onto a horizontally-centred rect of the given
+// aspect (width/height). ratio <= 0 disables the bound. Horizontal only.
+void ss_bounds_begin(float ratio);
+void ss_bounds_end(void);
+uchar ss_bounds_is_active(void);
+short ss_bounds_left_inset(void);
+
 #define MAX_CONVERT_TYPES 4
-#define MAX_USE_MODES 8
+// Needs to cover indices 0-14 (15 conversion-table slots: the original
+// 320x200 base, modes 1-4, the reserved sentinel at 5, 2 more unused
+// slots at 6-7 avoiding button-ID collisions, then the 7 menu
+// resolutions at 8-14), plus headroom for the 2 extra STEREO_SUPPORT
+// slots if that macro is ever enabled. Silently overflowing this array
+// corrupts whatever global happens to sit next to it in memory rather
+// than crashing predictably, so err generously here.
+#define MAX_USE_MODES 20
 
 extern fix convert_x[MAX_CONVERT_TYPES][MAX_USE_MODES];
 extern fix convert_y[MAX_CONVERT_TYPES][MAX_USE_MODES];

@@ -121,6 +121,15 @@ enum TEMP_STR_ {
 	REF_STR_MainMenu,
 	REF_STR_Digichan,
 
+    // HUD scale + HUD bounds (hard-coded custom strings; see _get_temp_string)
+    REF_STR_HudBounds    = 0x12000000,
+    REF_STR_HudBoundOff,   // "Off"
+    REF_STR_HudBound43,    // "4:3"
+    REF_STR_HudBound169,   // "16:9"
+    REF_STR_HudBound219,   // "21:9"
+    REF_STR_HUDScale,
+    REF_STR_HUDScale_Value,
+
     REF_STR_Seqer    = 0x20000000,
     REF_STR_ADLMIDI,
     REF_STR_NativeMI,

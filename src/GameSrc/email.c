@@ -464,6 +464,10 @@ void email_draw_text(Id email_id, bool really_an_email) {
     gr2ss_override = OVERRIDE_ALL;
 #endif
     gr_push_canvas(pinv_canvas);
+    // Draw the email/log text with the inventory block's uniform scale, exactly
+    // like the list text, so it isn't stretched on 16:9. No-op if the caller (the
+    // inventory draw) already holds the block override.
+    inventory_block_scale_begin();
     gr_set_font((grs_font *)ResLock(email_font));
     if (!full_game_3d)
         uiHideMouse(inventory_region->r);
@@ -552,6 +556,7 @@ done:
         } else if (email_curr_page > 1)
             draw_more_string(x, y, 0);
     }
+    inventory_block_scale_end();
     ResUnlock(email_font);
     if (!full_game_3d)
         uiShowMouse(inventory_region->r);

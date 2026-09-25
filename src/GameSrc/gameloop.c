@@ -70,17 +70,36 @@ long pal_frame = 0;
 void draw_pause_string(void) {
     LGRect r;
     short w, h, nw, nh;
+    extern uchar full_game_3d;
 
     gr_set_fcolor(RED_BASE + 4);
     gr_set_font((grs_font *)ResGet(RES_citadelFont));
     gr_string_size(get_string(REF_STR_Pause, NULL, 0), &w, &h);
-    nw = SCREEN_VIEW_X + (SCREEN_VIEW_WIDTH - w) / 2;
-    nh = SCREEN_VIEW_Y + (SCREEN_VIEW_HEIGHT - h) / 2;
-    RECT_FILL(&r, nw, nh, nw + w, nh + h);
-    gr2ss_override = OVERRIDE_ALL;
-    uiHideMouse(&r);
-    ss_string(get_string(REF_STR_Pause, NULL, 0), nw, nh);
-    uiShowMouse(&r);
+
+    if (full_game_3d) {
+        // Fullscreen: centre on the screen and draw with a resolution-relative
+        // uniform scale (ss_bounds maps the 320x200 space to a centred rect, so
+        // logical (160,100) lands on the screen centre) -- not SCONV, which
+        // stretches on widescreen, and not the block scale, which has no screen
+        // origin offset and would sit high-left.
+        ss_bounds_begin(4.0f / 3.0f);
+        nw = (320 - w) / 2;
+        nh = (200 - h) / 2;
+        RECT_FILL(&r, nw, nh, nw + w, nh + h);
+        gr2ss_override = OVERRIDE_ALL;
+        uiHideMouse(&r);
+        ss_string(get_string(REF_STR_Pause, NULL, 0), nw, nh);
+        uiShowMouse(&r);
+        ss_bounds_end();
+    } else {
+        nw = SCREEN_VIEW_X + (SCREEN_VIEW_WIDTH - w) / 2;
+        nh = SCREEN_VIEW_Y + (SCREEN_VIEW_HEIGHT - h) / 2;
+        RECT_FILL(&r, nw, nh, nw + w, nh + h);
+        gr2ss_override = OVERRIDE_ALL;
+        uiHideMouse(&r);
+        ss_string(get_string(REF_STR_Pause, NULL, 0), nw, nh);
+        uiShowMouse(&r);
+    }
 }
 
 //------------------------------------------------------------------
@@ -98,6 +117,14 @@ void game_loop(void) {
             draw_pause_string();
             redraw_paused = FALSE;
         }
+        // Keep the fullscreen 2D HUD plane fresh while paused. render_run()
+        // (the world) stays skipped, so the game state does not advance, but
+        // the HUD overlay is what leaves stale pixels behind when the pause
+        // menu redraws widgets over it -- redrawing it (not the world) each
+        // paused frame clears those artifacts immediately instead of only when
+        // play resumes.
+        if (full_game_3d)
+            loopLine(GL | 0x1A, fullscreen_overlay());
         // KLC - does nothing!  loopLine(GL|0x1D,synchronous_update());
         if (music_on)
             loopLine(GL|0x1C, mlimbs_do_ai());

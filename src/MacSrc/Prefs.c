@@ -95,6 +95,16 @@ static const char *PREF_MIDI_OUTPUT = "midi-output";
 static const char *PREF_PERSIST_MLOOK = "persist-mouselook";
 static const char *PREF_FOV = "fov";
 static const char *PREF_FULLSCREEN = "fullscreen";
+static const char *PREF_HUD_SCALE = "hud-scale";
+// Pre-hudScale name for the same setting; still accepted on load so an
+// existing prefs file keeps its value.
+static const char *PREF_MFD_SCALE_LEGACY = "mfd-scale";
+// Fullscreen HUD bounds: "off", "4:3", "16:9", "custom", or a "W:H" / decimal
+// ratio; see hud_bounds_parse() in newmfd.c. The custom key holds the ratio
+// used when the mode is "custom".
+static const char *PREF_HUD_BOUND = "hud-bound";
+static const char *PREF_HUD_BOUND_CUSTOM = "hud-bound-custom";
+extern int hud_bounds_parse(const char *s, short *mode, short *cw, short *ch);
 
 static void SetShockGlobals(void);
 
@@ -124,7 +134,7 @@ void SetDefaultPrefs(void) {
     gShockPrefs.soMusicVolume = 75;
     gShockPrefs.soSfxVolume = 100;
     gShockPrefs.soAudioLogVolume = 100;
-    gShockPrefs.doVideoMode = 3;
+    gShockPrefs.doVideoMode = 8; // Default to 1024x768 (see svga_mode_data in fullscrn.c). Was 3 (640x480).
     gShockPrefs.doResolution = 0; // High-res.
     gShockPrefs.doDetail = 3;     // Max detail.
     gShockPrefs.doUseOpenGL = false;
@@ -139,6 +149,10 @@ void SetDefaultPrefs(void) {
 	gShockPrefs.doFov = 80;
 	global_fov = gShockPrefs.doFov;
 	saved_fov = gShockPrefs.doFov;
+        gShockPrefs.hudScale = 100;
+        gShockPrefs.hudBoundMode = 0;     // off: HUD spans the full width
+        gShockPrefs.hudBoundCustomW = 21; // ratio used when the mode is "custom"
+        gShockPrefs.hudBoundCustomH = 9;
 
     SetShockGlobals();
 }
@@ -218,7 +232,14 @@ int16_t LoadPrefs(void) {
                 gShockPrefs.soAudioLogVolume = vol;
         } else if (strcasecmp(key, PREF_VIDEOMODE) == 0) {
             int mode = atoi(value);
-            if (mode >= 0 && mode <= 4)
+            // The port expanded the screen-mode menu to indices 0-14 (see
+            // svga_mode_data[] in fullscrn.c: 8=1024x768, 11=1280x720,
+            // 14=1920x1080, ...). This range check still only accepted the
+            // original 0-4, so every saved widescreen resolution was discarded
+            // on load and the mode silently reverted to the default (8 =
+            // 1024x768). Accept the full range; 5 is the reserved stereo-hack
+            // sentinel and must never be persisted/restored.
+            if (mode >= 0 && mode <= 14 && mode != 5)
                 gShockPrefs.doVideoMode = mode;
         } else if (strcasecmp(key, PREF_HALFRES) == 0) {
             gShockPrefs.doResolution = is_true(value);
@@ -268,7 +289,35 @@ int16_t LoadPrefs(void) {
 				fov = max_fov;
 			gShockPrefs.doFov = (short)fov;
 			saved_fov = gShockPrefs.doFov;
-			global_fov = gShockPrefs.doUseOpenGL ? 80 : gShockPrefs.doFov;
+			global_fov = gShockPrefs.doFov;
+		} else if (strcasecmp(key, PREF_HUD_SCALE) == 0 ||
+		           strcasecmp(key, PREF_MFD_SCALE_LEGACY) == 0) {
+			// "mfd-scale" is the pre-hudScale name (it used to scale only the
+			// MFD). Accepting both keeps existing prefs files working; the keys
+			// are never written together.
+			int scale = atoi(value);
+			if (scale < 100)
+				scale = 100;
+			if (scale > 1600)
+				scale = 1600;
+			gShockPrefs.hudScale = (short)scale;
+		} else if (strcasecmp(key, PREF_HUD_BOUND) == 0) {
+			short mode = 0, cw = 0, ch = 0;
+			int kind = hud_bounds_parse(value, &mode, &cw, &ch);
+			if (kind != 0) {
+				gShockPrefs.hudBoundMode = mode;
+				// "hud-bound = 21:9" also sets the custom ratio; presets leave it alone.
+				if (kind == 2 && mode == 3) {
+					gShockPrefs.hudBoundCustomW = cw;
+					gShockPrefs.hudBoundCustomH = ch;
+				}
+			}
+		} else if (strcasecmp(key, PREF_HUD_BOUND_CUSTOM) == 0) {
+			short mode = 0, cw = 0, ch = 0;
+			if (hud_bounds_parse(value, &mode, &cw, &ch) == 2) {
+				gShockPrefs.hudBoundCustomW = cw;
+				gShockPrefs.hudBoundCustomH = ch;
+			}
 		} else if (strcasecmp(key, PREF_FULLSCREEN) == 0) {
 			gShockPrefs.doFullscreen = is_true(value);
 		}
@@ -310,6 +359,15 @@ int16_t SavePrefs(void) {
     fprintf(f, "%s = %d\n", PREF_MIDI_OUTPUT, gShockPrefs.soMidiOutput);
 	fprintf(f, "%s = %s\n", PREF_PERSIST_MLOOK, gShockPrefs.goPersistMLook ? "yes" : "no");
 	fprintf(f, "%s = %d\n", PREF_FOV, gShockPrefs.doFov);
+	fprintf(f, "%s = %d\n", PREF_HUD_SCALE, gShockPrefs.hudScale);
+	{
+		static const char *bound_names[] = {"off", "4:3", "16:9", "custom"};
+		int bound_mode = gShockPrefs.hudBoundMode;
+		if (bound_mode < 0 || bound_mode > 3)
+			bound_mode = 0;
+		fprintf(f, "%s = %s\n", PREF_HUD_BOUND, bound_names[bound_mode]);
+		fprintf(f, "%s = %d:%d\n", PREF_HUD_BOUND_CUSTOM, gShockPrefs.hudBoundCustomW, gShockPrefs.hudBoundCustomH);
+	}
 	fprintf(f, "%s = %s\n", PREF_FULLSCREEN, gShockPrefs.doFullscreen ? "yes" : "no");
     fclose(f);
     return 0;

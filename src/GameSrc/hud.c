@@ -247,10 +247,19 @@ void compute_hud_var(HudLine *hl) {
     }
 }
 
+extern void inventory_block_scale_begin(void);
+extern void inventory_block_scale_end(void);
+extern int inventory_block_dx(void);
+
 void hud_update_lines(short x, short *y, short unused1, short unused2) {
     int i;
     short use_x, use_y;
 
+    // Draw the HUD text lines (the message line, etc.) with the inventory
+    // block's uniform scale so they aren't stretched on 16:9, and offset by the
+    // block's centring so they sit centred on the real screen.
+    inventory_block_scale_begin();
+    x += inventory_block_dx();
     for (i = 0; i < HUD_LINES; i++)
         if (hud_lines[i].mask & player_struct.hud_modes) {
             uchar compute_text = FALSE;
@@ -312,6 +321,8 @@ void hud_update_lines(short x, short *y, short unused1, short unused2) {
 #endif
         } else
             hud_free_line(i);
+
+    inventory_block_scale_end();
 }
 
 // -----------------------------------------
@@ -330,6 +341,13 @@ void hud_update_compass(short *y, short xmin, short xwid) {
     short ang, betw;
     ubyte ver = player_struct.hardwarez[CPTRIP(NAV_HARD_TRIPLE)];
     ubyte pang = objs[player_struct.rep].loc.h - HALF_COMPASS_ARC;
+    // Draw with the inventory block's uniform scale so the compass text/ticks
+    // aren't stretched on widescreen, and offset by the block's centring.
+    extern void inventory_block_scale_begin(void);
+    extern void inventory_block_scale_end(void);
+    extern int inventory_block_dx(void);
+    inventory_block_scale_begin();
+    xmin = (short)(xmin + inventory_block_dx());
     gr_set_fcolor(hud_colors[hud_color_bank][COMPASS_COLOR]);
     for (ang = 0; ang <= 255; ang += HUD_COMPASS_STEP) {
         ubyte adj = ang - pang;
@@ -355,6 +373,7 @@ void hud_update_compass(short *y, short xmin, short xwid) {
             ss_vline(x + xmin, *y + ((h - betw) / 2) - 1, *y + ((h + betw) / 2) - 1);
         }
     }
+    inventory_block_scale_end();
     *y += Y_STEP;
 }
 

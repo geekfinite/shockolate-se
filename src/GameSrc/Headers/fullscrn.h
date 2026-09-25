@@ -68,6 +68,7 @@ void fullscreen_exit(void);
 errtype fullscreen_overlay();
 errtype full_lower_region(LGRegion *r);
 errtype full_raise_region(LGRegion *r);
+void change_svga_cursors(void);
 
 // Globals
 extern LGRegion *fullroot_region, *fullview_region;

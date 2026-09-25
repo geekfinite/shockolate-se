@@ -28,7 +28,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //  Includes
 //--------------------
 #include <math.h>
+#include <stdlib.h>
 #include <SDL.h>
+
 
 #include "InitMac.h"
 #include "Modding.h"
@@ -83,10 +85,17 @@ extern void CreateDefaultKeybindsFile(void);
 extern void LoadHotkeyKeybinds(void);
 extern void LoadMoveKeybinds(void);
 
+int GetIntArgument(char *arg);
+void ApplyCustomResolutionArg(void);
+void ApplyHudBoundArg(void);
+
 //------------------------------------------------------------------------------------
 //		Main function.
 //------------------------------------------------------------------------------------
 int main(int argc, char **argv) {
+    // CRT debug heap removed: _CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF |
+    // _CRTDBG_CHECK_ALWAYS_DF) made every allocation walk and validate the
+    // whole heap, which is a large startup/per-frame cost in this build.
     // Save the arguments for later
 
     num_args = argc;
@@ -107,6 +116,16 @@ int main(int argc, char **argv) {
     SetDefaultPrefs();
     LoadPrefs();
 
+    // Apply the previously-selected screen resolution (persisted in prefs as
+    // doVideoMode). A custom -width/-height on the command line still wins --
+    // ApplyCustomResolutionArg() runs below and overrides this.
+    {
+        extern short mode_id;
+        if (gShockPrefs.doVideoMode >= 0 && gShockPrefs.doVideoMode <= 14 &&
+            gShockPrefs.doVideoMode != 5) // 5 is the reserved stereo sentinel
+            mode_id = gShockPrefs.doVideoMode;
+    }
+
     // see Prefs.c
     CreateDefaultKeybindsFile(); // only if it doesn't already exist
     // even if keybinds file still doesn't exist, defaults will be set here
@@ -124,6 +143,15 @@ int main(int argc, char **argv) {
 		enterFullscreen(false);
 	if (CheckArgument("-windowed"))
 		exitFullscreen(false);
+
+    // -width/-height <pixels>: use a custom (e.g. widescreen) resolution
+    // instead of one of the 5 built-in screen-mode menu options. Must run
+    // before init_all() -- see ApplyCustomResolutionArg().
+    ApplyCustomResolutionArg();
+
+    // -hudbound <off|4:3|16:9|W:H|ratio>: bound the fullscreen HUD to a centred
+    // rect of that aspect on widescreen. Overrides the prefs file for this run.
+    ApplyHudBoundArg();
 
     // CC: Modding support! This is so exciting.
 
@@ -171,6 +199,96 @@ bool CheckArgument(char *arg) {
     }
 
     return false;
+}
+
+// Returns the integer value following `arg` on the command line (e.g.
+// "-width 1920" -> 1920 when arg is "-width"), or -1 if the argument
+// wasn't given or has no numeric value after it.
+int GetIntArgument(char *arg) {
+    if (arg == NULL)
+        return -1;
+
+    for (int i = 1; i < num_args - 1; i++) {
+        if (strcmp(arg_values[i], arg) == 0) {
+            int value = atoi(arg_values[i + 1]);
+            if (value > 0)
+                return value;
+            return -1;
+        }
+    }
+
+    return -1;
+}
+
+// Applies a -width/-height override for the "1920x1080" screen-mode menu
+// slot (svga_mode_data[14], see fullscrn.c/wrapper.c -- that slot is also
+// the last entry of the redone screen-mode menu, so overriding it means
+// the menu's "1920x1080" button will actually read/produce whatever
+// custom size was requested here instead). Must run before init_all()
+// (specifically before InitSDL() and screen_init()) so the overridden
+// dimensions are what actually get used to create the window and register
+// the SCONV_X/Y scale tables. Both -width and -height must be given
+// together; if either is missing this is a no-op and existing behavior
+// (whatever the prefs file / menu selected) is unchanged.
+void ApplyCustomResolutionArg(void) {
+    int width = GetIntArgument("-width");
+    int height = GetIntArgument("-height");
+
+    if (width <= 0 || height <= 0)
+        return;
+
+    // Sanity-clamp to something the fixed-point SCONV math and the
+    // original 4:3 logical layout can reasonably scale to.
+    if (width < 320)
+        width = 320;
+    if (height < 200)
+        height = 200;
+
+    // Round down to a multiple of 4. gScreenRowbytes now correctly uses
+    // the real SDL surface pitch (see ShockBitmap.c), so this isn't
+    // strictly required anymore -- but keeping widths 4-aligned avoids
+    // relying on every other piece of old row-stepping code having the
+    // same guarantee, for comparatively little cost (at most 3px lost).
+    width &= ~3;
+    height &= ~3;
+
+    INFO("Custom resolution requested: %d x %d", width, height);
+
+    grd_mode_info[GRM_1920x1080x8].w = width;
+    grd_mode_info[GRM_1920x1080x8].h = height;
+
+    gShockPrefs.doVideoMode = 14;
+
+    extern short mode_id;
+    mode_id = 14;
+}
+
+// Applies a "-hudbound <value>" override for the fullscreen HUD bounds, e.g.
+// "-hudbound 4:3", "-hudbound 16:9", "-hudbound 21:9", "-hudbound 2.39" or
+// "-hudbound off". Parsing is shared with the prefs file (hud_bounds_parse()
+// in newmfd.c). Unparseable values are ignored.
+void ApplyHudBoundArg(void) {
+    extern int hud_bounds_parse(const char *s, short *mode, short *cw, short *ch);
+
+    for (int i = 1; i < num_args - 1; i++) {
+        if (strcmp(arg_values[i], "-hudbound") == 0) {
+            short mode = 0, cw = 0, ch = 0;
+            int kind = hud_bounds_parse(arg_values[i + 1], &mode, &cw, &ch);
+
+            if (kind == 0) {
+                INFO("-hudbound: can't parse \"%s\" (expected off, 4:3, 16:9, W:H or a decimal ratio)",
+                     arg_values[i + 1]);
+                return;
+            }
+            gShockPrefs.hudBoundMode = mode;
+            if (kind == 2 && mode == 3) {
+                gShockPrefs.hudBoundCustomW = cw;
+                gShockPrefs.hudBoundCustomH = ch;
+            }
+            INFO("HUD bounds set from command line: mode %d", (int)mode);
+            return;
+        }
+    }
 }
 
 void InitSDL() {
@@ -252,7 +370,7 @@ void SetSDLPalette(int index, int count, uchar *pal) {
     static bool gammalut_init = 0;
     static uchar gammalut[100 - 10 + 1][256];
     if (!gammalut_init) {
-		double factor = 2.2;// (can_use_opengl() ? 1.0 : 2.2); // OpenGL uses 2.2
+	double factor = 2.2;// (can_use_opengl() ? 1.0 : 2.2); // OpenGL uses 2.2
         int i, j;
         for (i = 10; i <= 100; i++) {
             double gamma = (double)i * 1.0 / 100;

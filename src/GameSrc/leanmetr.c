@@ -41,6 +41,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "gr2ss.h"
 
+// forward declaration -- definition is further down
+void draw_eye_bitmap(grs_bitmap *eye_bmap, LGPoint pos, int lasty);
+
 // -------
 // DEFINES
 // -------
@@ -49,11 +52,21 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define SLOT_EYEMETER_X 141
 #define SLOT_EYEMETER_Y 1
 
-#define FULL_EYEMETER_X 10
+#define FULL_EYEMETER_X 138 // centred: (320 - (LEANOMETER_W + LEANOMETER_XOFF)) / 2  ==  (320 - 44)/2
 #define FULL_EYEMETER_Y 1
 
-#define EYEMETER_X() (current_meter_region->abs_x)
-#define EYEMETER_Y() (current_meter_region->abs_y)
+// Draw origin, in BLOCK-LOGICAL units (real px / k): the meter draws run
+// under inventory_block_scale_begin/end, which maps logical -> real by *k (see
+// update_meters). The offsets below are therefore NATIVE units -- the *k is
+// supplied by the override.
+static int meter_draw_org_x(void);
+static int meter_draw_org_y(void);
+#define EYEMETER_X()  meter_draw_org_x()
+#define EYEMETER_Y()  meter_draw_org_y()
+// Raw 320x200 logical origin (region / input space); used by the region code
+// and the zoom, which never see the HUD override.
+#define EYEMETER_LX() (current_meter_region->abs_x)
+#define EYEMETER_LY() (current_meter_region->abs_y)
 #define LEANOMETER_XOFF 21
 #define LEANOMETER_YOFF 0
 #define LEANOMETER_X() (EYEMETER_X() + LEANOMETER_XOFF)
@@ -70,10 +83,58 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define LEANOMETER_W 23
 #define LEANOMETER_H EYEMETER_H
 
+
 #define NUM_LEAN_BMAPS 9
 #define BMAPS_PER_POSTURE 3
 
 extern uchar full_game_3d;
+
+// Fullscreen HUD tier k: real screen pixels per native (320x200-model) unit.
+// The meter's geometry is computed in REAL pixels from this k and the
+// framebuffer size, then expressed in block-logical units (real/k) for the draw
+// -- which runs under the shared isotropic override -- and in 320x200 logical
+// units for the region/input system. Both axes use the SAME k, so the meter is
+// square on screen at any aspect ratio.
+static float meter_kx(void) {
+    extern float hud_scale_factor(void);
+    extern uchar full_game_3d;
+    if (!full_game_3d)
+        return 1.0f;
+    return hud_scale_factor();
+}
+static float meter_ky(void) { return meter_kx(); }
+
+// Real px per 320x200-logical unit, per axis. The region and the mouse handlers
+// live in 320x200 logical space (see fscrn_rect in screen.c), so real-pixel
+// sizes are converted with this before region sizing / hit testing.
+static float meter_sconv_x(void) {
+    extern uchar full_game_3d;
+    return full_game_3d ? ((float)grd_cap->w / 320.0f) : 1.0f;
+}
+static float meter_sconv_y(void) {
+    extern uchar full_game_3d;
+    return full_game_3d ? ((float)grd_cap->h / 200.0f) : 1.0f;
+}
+
+// Native unit -> 320x200 logical unit (region/input space).
+static float meter_reg_kx(void) { return meter_kx() / meter_sconv_x(); }
+static float meter_reg_ky(void) { return meter_ky() / meter_sconv_y(); }
+
+// Block-logical draw origin (real px / k) from the region's 320x200 origin.
+// (current_meter_region is defined further down in this file.)
+extern LGRegion *current_meter_region;
+static int meter_draw_org_x(void) {
+    extern uchar full_game_3d;
+    if (!full_game_3d)
+        return current_meter_region->abs_x;
+    return (int)((float)current_meter_region->abs_x * meter_sconv_x() / meter_kx() + 0.5f);
+}
+static int meter_draw_org_y(void) {
+    extern uchar full_game_3d;
+    if (!full_game_3d)
+        return current_meter_region->abs_y;
+    return (int)((float)current_meter_region->abs_y * meter_sconv_y() / meter_ky() + 0.5f);
+}
 
 static ubyte discrete_eye_height[DISCRETE_EYE_POSITIONS] = {
     3,
@@ -270,18 +331,37 @@ void lean_icon(LGPoint *pos, grs_bitmap **icon, int *inum) {
         DEBUG("%s: No lean resource bitmap!", __FUNCTION__);
 
     // Determine where to draw the bitmap.
-    pos->y = 53 - (*icon)->h;
-    pos->x = (46 - (*icon)->w + 1) * abs(leanx) / 600;
-    if (leanx < 0)
-        pos->x = -pos->x;
-    pos->x += LEANOMETER_X() + (25) / 2 - ((*icon)->w + 1) / 2;
-    pos->y += LEANOMETER_Y() - 31;
+//    pos->y = 53 - (*icon)->h;
+//    pos->x = (46 - (*icon)->w + 1) * abs(leanx) / 600;
+//    if (leanx < 0)
+//        pos->x = -pos->x;
+//    pos->x += LEANOMETER_X() + (25) / 2 - ((*icon)->w + 1) / 2;
+//    pos->y += LEANOMETER_Y() - 31;
+
+    {
+        int icon_w = (*icon)->w;
+        int icon_h = (*icon)->h;
+
+        // Internal offset in the meter's native 44x22 space, kept in NATIVE
+        // units: the draw runs under the HUD override, which applies *k.
+        int off_x = (46 - icon_w + 1) * abs(leanx) / 600;
+        if (leanx < 0)
+            off_x = -off_x;
+        off_x += 12 - (icon_w + 1) / 2;   // (25)/2 - (icon_w+1)/2
+        int off_y = 22 - icon_h;          // LEANOMETER_H - icon_h
+
+        pos->x = LEANOMETER_X() + off_x;
+        pos->y = LEANOMETER_Y() + off_y;
+    }
+
 }
 
 static void undraw_meter_area(LGRect *r) {
     short a, b, c, d;
-    char saveMode;
     int x, y;
+    grs_bitmap *bg = meter_bkgnd();
+    int bw = bg->w; // native size; the HUD override supplies the *k
+    int bh = bg->h;
 
     STORE_CLIP(a, b, c, d);
     ss_safe_set_cliprect(r->ul.x, r->ul.y, r->lr.x, r->lr.y);
@@ -290,7 +370,10 @@ static void undraw_meter_area(LGRect *r) {
 
     if (is_onscreen())
         uiHideMouse(r);
-    ss_bitmap(meter_bkgnd(), x, y);
+    if (full_game_3d)
+        ss_scale_bitmap(bg, x, y, bw, bh);
+    else
+        ss_bitmap(bg, x, y);
     if (is_onscreen())
         uiShowMouse(r);
 
@@ -333,42 +416,45 @@ int player_get_eye_fixang(void) {
 }
 
 uchar eye_mouse_handler(uiEvent *ev, LGRegion *r, intptr_t data) {
+    // Hit area in 320x200 logical units (the space ev->pos is in).
+    int ew = (int)(EYEMETER_W * meter_reg_kx() + 0.5f);
+    int eh = (int)(EYEMETER_H * meter_reg_ky() + 0.5f);
     short x = ev->pos.x - r->abs_x;
     short y = ev->pos.y - r->abs_y;
     extern uchar hack_takeover;
     if (hack_takeover || global_fullmap->cyber)
         return FALSE;
-    if (x < 0 || x >= EYEMETER_W)
+    if (x < 0 || x >= ew)
         return FALSE;
-    eye_fine_mode = 2 * x > EYEMETER_W;
+    eye_fine_mode = 2 * x > ew;
     if (!eye_fine_mode)
-        y = discrete_eye_height[y * DISCRETE_EYE_POSITIONS / EYEMETER_H];
+        y = discrete_eye_height[y * DISCRETE_EYE_POSITIONS / eh];
     if (ev->mouse_data.buttons & (1 << MOUSE_LBUTTON)) {
         int theta;
         if ((ev->mouse_data.action & MOUSE_LDOWN) == 0 && uiLastMouseRegion[MOUSE_LBUTTON] != r)
             return FALSE;
         if (eye_fine_mode)
-            theta = -2 * MAX_EYE_ANGLE * (y) / (EYEMETER_H - 1) + MAX_EYE_ANGLE;
+            theta = -2 * MAX_EYE_ANGLE * (y) / (eh - 1) + MAX_EYE_ANGLE;
         else
-            theta = -FIXANG_PI / 6 * (y * DISCRETE_EYE_POSITIONS / EYEMETER_H - 1);
-        //      ui_mouse_constrain_xy(me->pos.x,r->abs_y,me->pos.x,r->abs_y+EYEMETER_H-1);
+            theta = -FIXANG_PI / 6 * (y * DISCRETE_EYE_POSITIONS / eh - 1);
         player_set_eye_fixang(theta);
         physics_set_relax(CONTROL_YZROT, FALSE);
-    }
-    if (ev->mouse_data.buttons == 0) {
-        //      mouse_constrain_xy(0,0,grd_cap->w-1,grd_cap->h-1);
     }
     return TRUE;
 }
 
 uchar lean_mouse_handler(uiEvent *ev, LGRegion *r, intptr_t data) {
-    short x = ev->pos.x - r->abs_x - LEANOMETER_XOFF;
-    short y = ev->pos.y - r->abs_y - LEANOMETER_YOFF;
-    if (x < 0 || x >= LEANOMETER_W || global_fullmap->cyber)
+    int xoff = (int)(LEANOMETER_XOFF * meter_reg_kx() + 0.5f);
+    int yoff = (int)(LEANOMETER_YOFF * meter_reg_ky() + 0.5f);
+    int lw = (int)(LEANOMETER_W * meter_reg_kx() + 0.5f);
+    int lh = (int)(LEANOMETER_H * meter_reg_ky() + 0.5f);
+    short x = ev->pos.x - r->abs_x - xoff;
+    short y = ev->pos.y - r->abs_y - yoff;
+    if (x < 0 || x >= lw || global_fullmap->cyber)
         return FALSE;
     if (ev->mouse_data.buttons & (1 << MOUSE_LBUTTON)) {
-        short posture = y * 3 / LEANOMETER_H;
-        short xlean = x * 220 / (LEANOMETER_W - 1) - 110;
+        short posture = y * 3 / lh;
+        short xlean = x * 220 / (lw - 1) - 110;
         if ((ev->mouse_data.action & MOUSE_LDOWN) == 0 && uiLastMouseRegion[MOUSE_LBUTTON] != r)
             return FALSE;
         if (xlean > 10)
@@ -381,10 +467,6 @@ uchar lean_mouse_handler(uiEvent *ev, LGRegion *r, intptr_t data) {
             player_set_posture(posture);
         player_set_lean(xlean, player_struct.leany);
         physics_set_relax(CONTROL_XZROT, FALSE);
-        //     ui_mouse_constrain_xy(LEANOMETER_X(),LEANOMETER_Y()+posture*LEANOMETER_H/3+1,LEANOMETER_X()+LEANOMETER_W-1,LEANOMETER_Y()+(posture+1)*LEANOMETER_H/3-1);
-    }
-    if (ev->mouse_data.buttons == 0) {
-        //      mouse_unconstrain();
     }
     return TRUE;
 }
@@ -402,7 +484,25 @@ void init_posture_meters(LGRegion *root, uchar fullscreen) {
     errtype err;
 
     if (fullscreen) {
-        RECT_MOVE(&r, MakePoint(FULL_EYEMETER_X, FULL_EYEMETER_Y));
+        // HUD scale: size the meter region about its (horizontal) centre.
+        // EYEMETER_X()/EYEMETER_Y() read the region's abs position, so the
+        // draw offset and hit area follow the scaled rect together.
+        // Region lives in 320x200 logical space (see fscrn_rect in screen.c),
+        // so size it with the logical (per-axis, real-px-correct) scale; the
+        // draw path derives its real origin from abs_x/abs_y via
+        // meter_draw_org_*().
+        float kx = meter_reg_kx(), ky = meter_reg_ky();
+        int mw = r.lr.x - r.ul.x;
+        int mh = r.lr.y - r.ul.y;
+        int nw = (int)(mw * kx + 0.5f);
+        int nh = (int)(mh * ky + 0.5f);
+        if (nw < 1) nw = 1;
+        if (nh < 1) nh = 1;
+	int new_x = (320 - nw) / 2;   // centered in real px (uniform per-axis scale)
+	int new_y = FULL_EYEMETER_Y;  // hug the top, no vertical recentering
+        RECT_MOVE(&r, MakePoint(new_x, new_y));
+        r.lr.x = r.ul.x + nw;
+        r.lr.y = r.ul.y + nh;
     } else {
         RECT_MOVE(&r, MakePoint(SLOT_EYEMETER_X, SLOT_EYEMETER_Y));
     }
@@ -448,77 +548,134 @@ void update_lean_meter(uchar force) {
         && shield == last_shield && shieldstr == last_shieldstr)
         return;
 
-    STORE_CLIP(a, b, c, d);
-    ss_safe_set_cliprect(LEANOMETER_X(), LEANOMETER_Y(), LEANOMETER_X() + LEANOMETER_W, LEANOMETER_Y() + LEANOMETER_H);
+    {
+        // Native sizes: the HUD override maps logical -> real by *k.
+        int icon_w = icon->w;
+        int icon_h = icon->h;
+        int meter_w = LEANOMETER_W;
+        int meter_h = LEANOMETER_H;
 
-    saveBio = gBioInited; // Turn off biometer while updating the lean meter.
-    gBioInited = FALSE;
+        STORE_CLIP(a, b, c, d);
+        ss_safe_set_cliprect(LEANOMETER_X(), LEANOMETER_Y(),
+                             LEANOMETER_X() + meter_w,
+                             LEANOMETER_Y() + meter_h);
 
-    if (force || last_lean_icon != -1) {
-        RECT_FILL(&r, LEANOMETER_X(), LEANOMETER_Y(), LEANOMETER_X() + 46, LEANOMETER_Y() + 53);
-        undraw_meter_area(&r);
+        saveBio = gBioInited;
+        gBioInited = FALSE;
+
+        if (force || last_lean_icon != -1) {
+            RECT_FILL(&r, LEANOMETER_X(), LEANOMETER_Y(),
+                      LEANOMETER_X() + 46,
+                      LEANOMETER_Y() + 53);
+            undraw_meter_area(&r);
+        }
+        // Fill rect in native units (the HUD override scales it by *k).
+        RECT_FILL(&r, pos.x, pos.y, pos.x + icon_w, pos.y + icon_h);
+
+        if (is_onscreen())
+            uiHideMouse(&r);
+
+        if (full_game_3d) {
+            ss_scale_bitmap(icon, r.ul.x, r.ul.y, icon_w, icon_h);
+            if (shield) {
+                grs_bitmap *sbm = NULL;
+                FrameDesc *f = RefGet(MKREF(shield_bmap_res, inum));
+                if (f != NULL) {
+                    f->bm.bits = (uint8_t *)(f + 1);
+                    sbm = &(f->bm);
+                } else
+                    DEBUG("%s: No shield resource bitmap!", __FUNCTION__);
+                if (sbm != NULL) {
+                    // shield_offsets[] is native; the override scales it by *k.
+                    int sox = shield_offsets[inum].x;
+                    int soy = shield_offsets[inum].y;
+                    ss_scale_bitmap(sbm, r.ul.x - sox, r.ul.y - soy,
+                                    sbm->w,
+                                    sbm->h);
+                }
+            }
+        } else {
+            ss_bitmap(icon, r.ul.x, r.ul.y);
+            if (shield) {
+                grs_bitmap *sbm = NULL;
+                FrameDesc *f = RefGet(MKREF(shield_bmap_res, inum));
+                if (f != NULL) {
+                    f->bm.bits = (uint8_t *)(f + 1);
+                    sbm = &(f->bm);
+                } else
+                    DEBUG("%s: No shield resource bitmap!", __FUNCTION__);
+                if (sbm != NULL)
+                    ss_bitmap(sbm, r.ul.x - shield_offsets[inum].x,
+                              r.ul.y - shield_offsets[inum].y);
+            }
+        }
+
+        gBioInited = saveBio;
+        if (is_onscreen())
+            uiShowMouse(&r);
+
+        last_lean_pos = pos;
+        last_lean_icon = MKREF(lean_bmap_res, inum);
+        last_shield = shield;
+        last_shieldstr = shieldstr;
+        RESTORE_CLIP(a, b, c, d);
     }
-    RECT_FILL(&r, pos.x, pos.y, pos.x + icon->w, pos.y + icon->h);
+}
+// Re-lay-out the FULLSCREEN meter region for the current HUD scale. The
+// region is created once at init (with k=1); this mirrors what
+// inventory_update_screen_mode() does for the inventory: on mode/scale change,
+// move+resize about the centre so the meter (position, hit area and, via the
+// scaled blits in update_lean_meter, the artwork) follows hudScale.
+void lean_meter_update_screen_mode(void) {
+    extern float hud_scale_factor(void); // fullscreen HUD scale (newmfd.c)
+    if (!full_game_3d)
+        return;
+    // Same layout as init_posture_meters: real-px size, expressed back in 320x200
+    // logical units for the region (the draw derives its origin from
+    // abs_x/abs_y under the HUD override).
+    float kx = meter_reg_kx(), ky = meter_reg_ky();
+    int mw = LEANOMETER_W + LEANOMETER_XOFF;
+    int mh = EYEMETER_H;
+    int nw = (int)(mw * kx + 0.5f);
+    int nh = (int)(mh * ky + 0.5f);
+    if (nw < 1) nw = 1;
+    if (nh < 1) nh = 1;
 
-    // saveMode = convert_use_mode;
-    // convert_use_mode = 0;
+    int new_x = (320 - nw) / 2;   // centered in real px (uniform per-axis scale)
+    int new_y = FULL_EYEMETER_Y;  // hug the top, no vertical recentering
+    region_move(&fullscrn_meter_region, new_x, new_y, 2);
+    region_resize(&fullscrn_meter_region, nw, nh);
 
-    if (is_onscreen())
-        uiHideMouse(&r);
-    ss_bitmap(icon, r.ul.x, r.ul.y);
-
-    if (shield) {
-        grs_bitmap *sbm;
-
-        // Get a pointer to the corresponding lean bitmap.
-	FrameDesc *f = RefGet(MKREF(shield_bmap_res, inum));
-	if (f != NULL) {
-            f->bm.bits = (uint8_t *)(f + 1);
-            sbm = &(f->bm);
-        } else
-            DEBUG("%s: No shield resource bitmap!", __FUNCTION__);
-
-        // Place shield image with offset
-        ss_bitmap(sbm, r.ul.x - shield_offsets[inum].x, r.ul.y - shield_offsets[inum].y);
-    }
-
-    gBioInited = saveBio;
-
-    if (is_onscreen())
-        uiShowMouse(&r);
-    // convert_use_mode = saveMode;
-
-    last_lean_pos = pos;
-    last_lean_icon = MKREF(lean_bmap_res, inum);
-    last_shield = shield;
-    last_shieldstr = shieldstr;
-    RESTORE_CLIP(a, b, c, d);
 }
 
 void draw_eye_bitmap(grs_bitmap *eye_bmap, LGPoint pos, int lasty) {
     LGRect r;
-    char saveMode;
+    int dw = eye_bmap->w; // native; the HUD override supplies the *k
+    int dh = eye_bmap->h;
 
     current_meter_region = PICK_METER_REGION(full_game_3d);
-    pos.x += EYEMETER_X();
-    pos.y += EYEMETER_Y();
-    r.ul = pos;
-    r.lr.x = pos.x + eye_bmap->w;
-    r.ul.y = lasty;
-    r.lr.y = lasty + eye_bmap->h + 1;
+    pos.x = EYEMETER_X() + pos.x;
+    pos.y = EYEMETER_Y() + pos.y;
+    int oldy = EYEMETER_Y() + lasty;
+
+    r.ul.x = pos.x;
+    r.lr.x = pos.x + dw;
+    r.ul.y = oldy;
+    r.lr.y = oldy + dh + 1;
     undraw_meter_area(&r);
     r.ul.y = pos.y;
-    r.lr.y = pos.y + eye_bmap->h;
+    r.lr.y = pos.y + dh;
 
-    // saveMode = convert_use_mode;
-    // convert_use_mode = 0;
     if (is_onscreen())
         uiHideMouse(&r);
-    ss_bitmap(eye_bmap, r.ul.x, r.ul.y);
+    if (full_game_3d)
+        ss_scale_bitmap(eye_bmap, r.ul.x, r.ul.y, dw, dh);
+    else
+        ss_bitmap(eye_bmap, r.ul.x, r.ul.y);
     if (is_onscreen())
         uiShowMouse(&r);
-    // convert_use_mode = saveMode;
 }
+
 
 #define HIRES_EYEMETER_H 53
 
@@ -549,8 +706,9 @@ void update_eye_meter(uchar force) {
     if (!force && y == last_y && lefty == last_ly && eye_fine_mode == last_mode)
         return;
     STORE_CLIP(a, b, c, d);
-    ss_safe_set_cliprect(EYEMETER_X(), EYEMETER_Y(), EYEMETER_X() + EYEMETER_W, EYEMETER_Y() + EYEMETER_H);
-
+    ss_safe_set_cliprect(EYEMETER_X(), EYEMETER_Y(),
+                         EYEMETER_X() + EYEMETER_W,
+                         EYEMETER_Y() + EYEMETER_H);
     saveBio = gBioInited; // Turn off biometer while updating the eye meter.
     gBioInited = FALSE;
 
@@ -571,9 +729,16 @@ void update_eye_meter(uchar force) {
 }
 
 void update_meters(uchar force) {
+    extern void inventory_block_scale_begin(void);
+    extern void inventory_block_scale_end(void);
     current_meter_region = PICK_METER_REGION(full_game_3d);
+    // Draw the meters under the shared isotropic fullscreen HUD override
+    // (no-op outside fullscreen): logical -> real by a uniform *k, so the
+    // native-sized offsets land as square real pixels at any aspect ratio.
+    inventory_block_scale_begin();
     update_eye_meter(force);
     update_lean_meter(force);
+    inventory_block_scale_end();
 }
 
 void zoom_to_lean_meter(void) {
@@ -584,7 +749,8 @@ void zoom_to_lean_meter(void) {
     LGRect end = {{0, 0}, {LEANOMETER_W, LEANOMETER_H}};
 
     current_meter_region = PICK_METER_REGION(full_game_3d);
-    RECT_MOVE(&end, MakePoint(LEANOMETER_X(), LEANOMETER_Y()));
+    // 320x200 logical strip origin (region/zoom space).
+    RECT_MOVE(&end, MakePoint(EYEMETER_LX() + LEANOMETER_XOFF, EYEMETER_LY() + LEANOMETER_YOFF));
     mouse_get_xy(&pos.x, &pos.y);
     if (!DoubleSize)
         ss_point_convert(&(pos.x), &(pos.y), TRUE);

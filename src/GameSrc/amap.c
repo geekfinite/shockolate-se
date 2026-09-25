@@ -512,9 +512,15 @@ void obj_mess(curAMap *amptr, MapElem *curmp, int drw, int xm, int ym, int tsize
                                 shadow_scale = FALSE;
 #endif
 #ifdef CORRECT_PIXEL_RATIO
-                                draw_shadowed_string(buf, xm + 1, coor_to_pix(ym - tsize + 1), AQUA_8_BASE + col);
+                            if (amptr == oAMap(MFD_FULLSCR_MAP))
+                                    ss_isotropic_shadowed_string(buf, xm + 1, coor_to_pix(ym - tsize + 1), AQUA_8_BASE + col);
+                            else
+                                    draw_shadowed_string(buf, xm + 1, coor_to_pix(ym - tsize + 1), AQUA_8_BASE + col);
 #else
-                            draw_shadowed_string(buf, xm + 1, ym - tsize + 1, AQUA_8_BASE + col);
+                            if (amptr == oAMap(MFD_FULLSCR_MAP))
+                                    ss_isotropic_shadowed_string(buf, xm + 1, ym - tsize + 1, AQUA_8_BASE + col);
+                            else
+                                    draw_shadowed_string(buf, xm + 1, ym - tsize + 1, AQUA_8_BASE + col);
 #endif
 #ifdef SVGA_SUPPORT
                                 shadow_scale = TRUE;

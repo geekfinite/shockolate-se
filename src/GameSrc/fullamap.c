@@ -27,6 +27,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "tools.h"
 #include "game_screen.h"
 #include "input.h"
+#include "gr2ss.h"
 
 #include "mainloop.h"
 #include "amaploop.h"
@@ -92,6 +93,7 @@ void amap_start() {
 
     HotkeyContext = AMAP_CONTEXT;
     uiSetCurrentSlab(&amap_slab);
+
 
     gr_set_screen(svga_screen);
     fsmap_startup();

@@ -48,6 +48,28 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // creates and initializes the inventory region
 LGRegion *create_invent_region(LGRegion *parent, LGRegion **pbuttons, LGRegion **pinvent);
 
+// Real-pixel size of the fullscreen inventory text block (== INVENTORY_PANEL_W/H
+// on the unscaled 320x200 game screen). Used by text-layout code to keep
+// accumulated pixel advances in the same units as SCONV-mapped draw positions.
+int inventory_block_real_w(void);
+int inventory_block_real_h(void);
+
+// Re-entrant SCONV override so block text draws at the inventory's uniform scale.
+// "begin"/"end" nest safely; used around the inventory draw and the email/log draw.
+void inventory_block_scale_begin(void);
+void inventory_block_scale_end(void);
+
+// Logical x offset of the centred block, for elements drawn directly (HUD lines,
+// biorhythm) that aren't blitted through the block canvas.
+int inventory_block_dx(void);
+
+// Logical origin/size of the centred fullscreen inventory block. Used by the
+// pause menu (wrapper.c) to remap mouse coords onto the bounded panel.
+int inventory_panel_org_x(void);
+int inventory_panel_org_y(void);
+int inventory_panel_org_w(void);
+int inventory_panel_org_h(void);
+
 // Draw the inventory area.  Keeps information on most recent draw so only does
 // incremental updates.
 errtype inventory_draw(void);

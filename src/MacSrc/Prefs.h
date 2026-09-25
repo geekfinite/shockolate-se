@@ -62,6 +62,15 @@ typedef struct {
     // 1 => bilinear
     // TODO: add trilinear, anisotropic?
     short doTextureFilter;
+    // Fullscreen HUD scale, percent. 100 == the pre-hudScale appearance.
+    // Drives MFD, vitals, inventory and the lean meter -- see hud_scale_factor().
+    short hudScale;
+    // Fullscreen HUD bounds (widescreen): confine the edge-anchored HUD elements
+    // to a horizontally centred rect of this aspect. 0 = off (full width),
+    // 1 = 4:3, 2 = 16:9, 3 = custom (hudBoundCustomW : hudBoundCustomH).
+    // See hud_bounds_insets() in newmfd.c.
+    short hudBoundMode;
+    short hudBoundCustomW, hudBoundCustomH;
 } ShockPrefs;
 
 //--------------------

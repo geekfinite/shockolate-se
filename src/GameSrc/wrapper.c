@@ -60,6 +60,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "fovchange.h"
 #include "fullscrntogg.h"
 
+#include <stdlib.h>
+
 #include "OpenGL.h"
 
 
@@ -216,6 +218,7 @@ typedef struct {
 typedef struct {
     uchar keyeq;
     Ref descrip;
+    char *literal_text; // if non-NULL, used instead of get_temp_string(descrip)
     uchar fcolor;
     uchar shadow;
     void (*pushfunc)(uchar butid);
@@ -353,6 +356,7 @@ uchar fv;
 static char MIDI_STR_BUFFER[MIDI_OUT_STR_SIZE];
 
 char fovtext[20];
+char hudtext[20];
 
 static char *_get_temp_string(int num) {
     switch (num) {
@@ -367,6 +371,16 @@ static char *_get_temp_string(int num) {
 			sprintf(fovtext, "%d", saved_fov);
 			return fovtext;
 		case REF_STR_Fullscreen: return "Fullscreen";
+		case REF_STR_HUDScale: return "HUD Scale";
+		case REF_STR_HUDScale_Value:
+			memset(hudtext, 0, sizeof(hudtext));
+			sprintf(hudtext, "%dx", (gShockPrefs.hudScale ? gShockPrefs.hudScale : 200) / 100);
+			return hudtext;
+		case REF_STR_HudBounds: return "HUD Bounds";
+		case REF_STR_HudBoundOff: return "Off";
+		case REF_STR_HudBound43: return "4:3";
+		case REF_STR_HudBound169: return "16:9";
+		case REF_STR_HudBound219: return "21:9";
 
         case REF_STR_TextFilt: return "Tex Filter";
         case REF_STR_TFUnfil:  return "Unfiltered";
@@ -419,8 +433,16 @@ void draw_button(uchar butid) {
 #endif
         uiHideMouse(NULL);
         gr_push_canvas(&inv_norm_canvas);
+        // Runtime redraws (slider drags, multi/toggle updates) must use the SAME
+        // isotropic block scale the panel was drawn with in opanel_redraw;
+        // without it the redrawn widget is scaled by the mode's SCONV factors
+        // instead of the HUD tier, so it lands stretched / in the wrong place.
+        if (full_game_3d)
+            inventory_block_scale_begin();
         gr_set_font(opt_font);
         OButtons[butid].drawfunc(butid);
+        if (full_game_3d)
+            inventory_block_scale_end();
         gr_pop_canvas();
         uiShowMouse(NULL);
 #ifdef GR2SS_OVERRIDE
@@ -579,7 +601,7 @@ void pushbutton_draw_func(uchar butid) {
     w = BR(butid).lr.x - BR(butid).ul.x;
     h = BR(butid).lr.y - BR(butid).ul.y;
 
-    btext = get_temp_string(st->descrip);
+    btext = st->literal_text ? st->literal_text : get_temp_string(st->descrip);
     gr_string_wrap(btext, BR(butid).lr.x - BR(butid).ul.x - 3);
     text_button(btext, BR(butid).ul.x, BR(butid).ul.y, st->fcolor, st->shadow, -w, -h);
     gr_font_string_unwrap(btext);
@@ -606,7 +628,20 @@ void pushbutton_init(uchar butid, uchar keyeq, Ref descrip, void (*pushfunc)(uch
     st->shadow = BUTTON_SHADOW;
     st->keyeq = keyeq;
     st->descrip = descrip;
+    st->literal_text = NULL;
     st->pushfunc = pushfunc;
+}
+
+// Same as pushbutton_init(), but draws a literal caller-supplied string
+// instead of fetching one via a resource Ref. Added for the screen-mode
+// menu (see screenmode_screen_init()), which needs to show resolutions
+// like "1920x1080" that don't exist as compiled resource strings. `text`
+// is not copied -- the caller owns its lifetime, and it must stay valid
+// for as long as the button is displayed (a static/persistent buffer,
+// not a stack temporary).
+void pushbutton_init_text(uchar butid, uchar keyeq, char *text, void (*pushfunc)(uchar butid), LGRect *r) {
+    pushbutton_init(butid, keyeq, ID_NULL, pushfunc, r);
+    OButtons[butid].user.pushbutton_st.literal_text = text;
 }
 
 void dim_pushbutton(uchar butid) {
@@ -739,12 +774,14 @@ uchar multi_handler(uiEvent *ev, uchar butid) {
     }
 
     if (delta) {
-        val = multi_get_curval(st->type, st->curval);
-        val = (val + delta) % (st->num_opts);
+        Ref fb  = st->feedbackbase;    // cache everything we need from st
+        uchar n = st->num_opts;
+        uint cur = multi_get_curval(st->type, st->curval);
+        val = (cur + delta) % n;
         multi_set_curval(st->type, st->curval, val, st->dealfunc);
         draw_button(butid);
-        if (st->feedbackbase) {
-            string_message_info(st->feedbackbase + val);
+        if (fb) {
+            string_message_info(fb + val);
         }
         return TRUE;
     }
@@ -1065,6 +1102,16 @@ uchar opanel_mouse_handler(uiEvent *ev, LGRegion *r, intptr_t user_data) {
     mev.pos.x -= inventory_region->r->ul.x;
     mev.pos.y -= inventory_region->r->ul.y;
 
+    // In fullscreen the pause menu is drawn onto the centred uniform inventory
+    // block, so map the click back into panel-local space with the block's
+    // origin/size rather than the fixed INVENTORY_PANEL_* rect (same remap as
+    // inventory_mouse_handler). Uses the ORIGINAL ev->pos, because mev.pos
+    // already had the fixed region origin subtracted above.
+    if (full_game_3d) {
+        mev.pos.x = (short)((ev->pos.x - inventory_panel_org_x()) * INVENTORY_PANEL_WIDTH / inventory_panel_org_w());
+        mev.pos.y = (short)((ev->pos.y - inventory_panel_org_y()) * INVENTORY_PANEL_HEIGHT / inventory_panel_org_h());
+    }
+
     for (b = 0; b < MAX_OPTION_BUTTONS; b++) {
         if (RECT_TEST_PT(&BR(b), mev.pos) && (ev->type & OButtons[b].evmask)) {
             if (OButtons[b].handler && OButtons[b].handler((uiEvent *)(&mev), b))
@@ -1121,6 +1168,10 @@ void opanel_redraw(uchar back) {
     gr_push_canvas(&inv_norm_canvas);
     uiHideMouse(NULL);
     gr_set_font(opt_font);
+    // Draw the pause menu with the inventory block's uniform scale so it lines
+    // up with the bounded in-game HUD instead of stretching on widescreen.
+    if (full_game_3d)
+        inventory_block_scale_begin();
     if (back) {
         if (full_game_3d)
             ss_noscale_bitmap(&inv_view360_canvas.bm, FULL_BACK_X, FULL_BACK_Y);
@@ -1133,6 +1184,8 @@ void opanel_redraw(uchar back) {
             OButtons[but].drawfunc(but);
         }
     }
+    if (full_game_3d)
+        inventory_block_scale_end();
     uiShowMouse(&r);
     gr_pop_canvas();
 #ifdef SVGA_SUPPORT
@@ -1480,6 +1533,56 @@ static void midi_output_dealfunc(short val) {
 short global_fov = 80;
 short saved_fov = 80;
 
+// HUD scale slider (2x..10x) holds 0..8 -> 200..1000.
+short hudscalesliderval = 0;
+
+static void hudscale_slider_dealfunc(short val) {
+	short pct = (short)(200 + val * 100);
+	gShockPrefs.hudScale = pct;
+	// Repaint the (frozen) world first, so the HUD's OLD footprint -- drawn at
+	// the previous scale -- is erased; then the HUD at the new scale; then the
+	// panel. The forced variant is needed because the pause menu obscures the
+	// view, which makes plain render_run() a no-op. Redraw only; state stays
+	// paused. The world repaint also wipes the "Paused." string, so request it.
+	{
+		extern uchar redraw_paused;
+		extern uchar screen_static_drawn;
+		extern errtype do_screen_static(void);
+		chg_set_flg(DEMOVIEW_UPDATE); // make the renderer redraw rather than reuse the frame
+		render_world_force();
+		// Repaint the HUD's own static backdrop over the old HUD footprint
+		// (render_run() does the same by clearing this flag): this is what
+		// erases the previous-scale HUD while the game is paused.
+		screen_static_drawn = FALSE;
+		do_screen_static();
+		redraw_paused = TRUE;
+	}
+	mfd_set_hud_scale(pct);
+	opanel_redraw(TRUE);
+}
+
+// HUD bounds: 0=off, 1=4:3, 2=16:9, 3=21:9 (stored as a custom ratio).
+static void hudbound_dealfunc(short mode) {
+	// Same as the HUD scale: repaint the frozen world (forced: the menu
+	// obscures the view) to clear the old HUD footprint before the HUD is laid
+	// out for the new bounds.
+	{
+		extern uchar redraw_paused;
+		extern uchar screen_static_drawn;
+		extern errtype do_screen_static(void);
+		chg_set_flg(DEMOVIEW_UPDATE);
+		render_world_force();
+		screen_static_drawn = FALSE;
+		do_screen_static();
+		redraw_paused = TRUE;
+	}
+	if (mode == 3)
+		hud_bounds_set(3, 21, 9);
+	else
+		hud_bounds_set(mode, 0, 0);
+	opanel_redraw(TRUE);
+}
+
 static void fov_slider_dealfunc(short val) {
 	float newval = ((float)val / 100.0f);
 	short maxfov = max_fov;
@@ -1487,7 +1590,7 @@ static void fov_slider_dealfunc(short val) {
 	short newfov = minfov + ((maxfov - minfov) * newval);
 	gShockPrefs.doFov = newfov;
 	saved_fov = newfov;
-	global_fov = gShockPrefs.doUseOpenGL ? 80 : newfov;
+	global_fov = newfov;
 	opanel_redraw(TRUE);
 }
 
@@ -1648,6 +1751,10 @@ void screenmode_change(uchar new_mode) {
     QUESTVAR_SET(SCREENMODE_QVAR, new_mode);
     change_mode_func(0, 0, _current_loop);
     wrapper_screenmode_hack = TRUE;
+
+    // Persist the chosen resolution (doVideoMode) so the next launch starts here.
+    gShockPrefs.doVideoMode = mode_id;
+    SavePrefs();
 
     INFO("Changed screen mode to %i\n", mode_id);
     wrapper_panel_close(TRUE);
@@ -1943,9 +2050,6 @@ void video_screen_init(void) {
     // renderer
     if(can_use_opengl()) {
 
-		if (gShockPrefs.doUseOpenGL)
-			global_fov = 80;
-
         standard_button_rect(&r, i, 2, 2, 2);
         multi_init(i, 'g', REF_STR_Renderer, REF_STR_Software, ID_NULL,
                    sizeof(gShockPrefs.doUseOpenGL), &gShockPrefs.doUseOpenGL, 2, renderer_dealfunc, &r);
@@ -2021,6 +2125,12 @@ void video_screen_master_init(void) {
 
 	i++;
 
+	// HUD bounds (Off / 4:3 / 16:9 / 21:9)
+	standard_button_rect(&r, i, 2, 2, 2);
+	multi_init(i, 'b', REF_STR_HudBounds, REF_STR_HudBoundOff, ID_NULL,
+		sizeof(gShockPrefs.hudBoundMode), &gShockPrefs.hudBoundMode, 4, hudbound_dealfunc, &r);
+	i++;
+
 	// return (fixed at position 5)
 	standard_button_rect(&r, 5, 2, 2, 2);
 	pushbutton_init(RETURN_BUTTON, 'r', REF_STR_OptionsText + 5, wrapper_pushbutton_func, &r);
@@ -2038,8 +2148,8 @@ void renderprefs_screen_init(void)
 	fovsliderval = 100 * (short)(((float)global_fov - min_fov) / (max_fov - min_fov));
 	standard_slider_rect(&r, i, 2, 5);
 	r.lr.x += (r.lr.x - r.ul.x);
-	r.ul.y -= 10;
-	r.lr.y -= 10;
+	r.ul.y -= 14;
+	r.lr.y -= 14;
 	slider_init(i, REF_STR_FOV, sizeof(fovsliderval), FALSE, &fovsliderval, 100,
 		0, fov_slider_dealfunc, &r);
 
@@ -2049,18 +2159,47 @@ void renderprefs_screen_init(void)
 	int textoffset = (r.lr.x - r.ul.x) * 1;
 	r.lr.x += textoffset;
 	r.ul.x += textoffset;
-	r.lr.y -= 5;
-	r.ul.y -= 5;
+	r.lr.y -= 9;
+	r.ul.y -= 9;
 	textwidget_init(i, BUTTON_COLOR, REF_STR_FOV_Value, &r);
 	fovtextactive = true;
 	fovtextid = i;
 
 	i++;
-	i++;
 
+	// fullscreen (slot 2, so the HUD scale slider can take the slot below FOV)
 	standard_button_rect(&r, i, 2, 2, 2);
 	multi_init(i, 'f', REF_STR_Fullscreen, REF_STR_OffonText, ID_NULL,
 		sizeof(gShockPrefs.doFullscreen), &(gShockPrefs.doFullscreen), 2, fullscreen_dealfunc, &r);
+
+	i++;
+
+	// HUD scale slider (2x..10x): same shape as the FOV slider, one row down.
+	{
+		short hs = gShockPrefs.hudScale ? gShockPrefs.hudScale : 200;
+		if (hs < 200) hs = 200;
+		if (hs > 1000) hs = 1000;
+		hudscalesliderval = (short)((hs + 50) / 100 - 2);
+		if (hudscalesliderval < 0) hudscalesliderval = 0;
+		if (hudscalesliderval > 8) hudscalesliderval = 8;
+	}
+	standard_slider_rect(&r, i, 2, 5);
+	r.lr.x += (r.lr.x - r.ul.x);
+	r.ul.y -= 8;
+	r.lr.y -= 8;
+	slider_init(i, REF_STR_HUDScale, sizeof(hudscalesliderval), FALSE, &hudscalesliderval, 8,
+		0, hudscale_slider_dealfunc, &r);
+
+	i++;
+
+	// HUD scale value ("3x")
+	standard_button_rect(&r, i, 1, 2, 10);
+	int hudtextoffset = (r.lr.x - r.ul.x) * 1;
+	r.lr.x += hudtextoffset;
+	r.ul.x += hudtextoffset;
+	r.lr.y -= 3;
+	r.ul.y -= 3;
+	textwidget_init(i, BUTTON_COLOR, REF_STR_HUDScale_Value, &r);
 
 	i++;
 
@@ -2129,6 +2268,29 @@ void screenmode_screen_init(void) {
     LGRect r;
     int i;
     char *keys;
+    // Menu-slot -> svga_mode_data index, in the order requested: 1024x768
+    // first/default, then 800x600, 854x480, 1280x720, 1366x768, 1600x900,
+    // 1920x1080. Slots 0-7 of svga_mode_data are untouched stock entries
+    // (see fullscrn.c) and are no longer shown here, but still exist.
+    //
+    // IMPORTANT: these values are used as the OButtons button ID for each
+    // resolution button, not just for labeling -- pushbutton_handler()
+    // calls a button's pushfunc with that button's own ID as its
+    // argument, and screenmode_change() takes that value and assigns it
+    // straight to mode_id. So the button ID *is* the mode that gets
+    // activated on click; there's no separate translation step. That
+    // means these values can't collide with RETURN_BUTTON (6) or
+    // QUIT_BUTTON (7) either, which is why the mode table starts at 8,
+    // not 6.
+    static const uchar menu_modes[7] = {8, 9, 10, 11, 12, 13, 14};
+    // Backing storage for pushbutton_init_text()'s labels -- it doesn't
+    // copy the string, so this needs to outlive the call and stay put
+    // across redraws (static, not a stack buffer).
+    static char screenmode_labels[7][16];
+    // Resource-string hotkeys only ever covered 5 buttons; rather than
+    // read past the end of that baked string for the 2 new ones, give
+    // them their own literal hotkeys.
+    static const char extra_keys[2] = {'6', '7'};
 
     if (wrapper_screenmode_hack && !(can_use_opengl() && gShockPrefs.doUseOpenGL)) {
         uiHideMouse(NULL);
@@ -2141,24 +2303,31 @@ void screenmode_screen_init(void) {
 
     clear_obuttons();
 
-    for (i = 0; i < 5; i++) {
+    for (i = 0; i < 7; i++) {
         extern short svga_mode_data[];
         uchar mode_ok = FALSE;
         char j = 0;
-        standard_button_rect(&r, i, 2, 2, 2);
-        pushbutton_init(i, keys[i], REF_STR_ScreenModeText + i, screenmode_change, &r);
+        uchar mode_idx = menu_modes[i]; // also this button's OButtons ID
+        uchar keyeq = (i < 5) ? keys[i] : extra_keys[i - 5];
+
+        snprintf(screenmode_labels[i], sizeof(screenmode_labels[i]), "%dx%d", grd_mode_info[svga_mode_data[mode_idx]].w,
+                 grd_mode_info[svga_mode_data[mode_idx]].h);
+
+        standard_button_rect(&r, i, 2, 3, 2); // i: grid position only, unrelated to the button's ID
+        pushbutton_init_text(mode_idx, keyeq, screenmode_labels[i], screenmode_change, &r);
+
         while ((grd_info.modes[j] != -1) && !mode_ok) {
-            if (grd_info.modes[j] == svga_mode_data[i])
+            if (grd_info.modes[j] == svga_mode_data[mode_idx])
                 mode_ok = TRUE;
             j++;
         }
         if (!mode_ok)
-            dim_pushbutton(i);
-        else if (i == convert_use_mode)
-            bright_pushbutton(i);
+            dim_pushbutton(mode_idx);
+        else if (mode_idx == convert_use_mode)
+            bright_pushbutton(mode_idx);
     }
 
-    standard_button_rect(&r, 5, 2, 2, 2);
+    standard_button_rect(&r, 7, 2, 3, 2);
     pushbutton_init(RETURN_BUTTON, keys[2], REF_STR_OptionsText + 5, wrapper_pushbutton_func, &r);
 
     // FIXME: Cannot pass a keycode with modifier flags as uchar
@@ -2407,13 +2576,23 @@ errtype make_options_cursor(void) {
     LGPoint hot = {0, 0};
     grs_canvas cursor_canv;
     short orig_w;
-    extern uchar svga_options_cursor_bits[];
+//    extern uchar svga_options_cursor_bits[];
+    extern uchar *svga_options_cursor_bits;
+    extern size_t svga_options_cursor_bits_size;
     uchar old_over = gr2ss_override;
     gr2ss_override = OVERRIDE_ALL;
 
     orig_w = w = res_bm_width(REF_IMG_bmOptionCursor);
     h = res_bm_height(REF_IMG_bmOptionCursor);
     ss_point_convert(&w, &h, FALSE);
+    
+	size_t needed = (size_t)w * (size_t)h;
+	if (needed > svga_options_cursor_bits_size) {
+	    free(svga_options_cursor_bits);
+	    svga_options_cursor_bits = (uchar *)malloc(needed);
+	    svga_options_cursor_bits_size = needed;
+	}
+
     gr_init_bm(&option_cursor_bmap, svga_options_cursor_bits, BMT_FLAT8, BMF_TRANS, w, h);
     gr_make_canvas(&option_cursor_bmap, &cursor_canv);
     gr_push_canvas(&cursor_canv);

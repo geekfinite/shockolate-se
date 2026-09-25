@@ -462,7 +462,12 @@ errtype schedule_run(Schedule *s, ushort time) {
 }
 
 void run_schedules(void) {
-    schedule_run(&global_fullmap->sched[MAP_SCHEDULE_GAMETIME], TICKS2TSTAMP(player_struct.game_time));
+    // The game-time schedule's queue lives inside the full map; if it has not
+    // been loaded (or has been dropped) the pointer dereference faults (seen as
+    // pqueue_least(q=0x28)). Skip it defensively - game_seconds_schedule is a
+    // static and always valid.
+    if (global_fullmap != NULL)
+        schedule_run(&global_fullmap->sched[MAP_SCHEDULE_GAMETIME], TICKS2TSTAMP(player_struct.game_time));
     schedule_run(&game_seconds_schedule, TICKS2TSTAMP(player_struct.game_time));
 }
 

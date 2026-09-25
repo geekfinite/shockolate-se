@@ -83,6 +83,8 @@ void side_icon_language_change(void);
 
 void zoom_to_side_icon(LGPoint from, int icon);
 
+void side_icon_rebuild_regions(void);
+
 // Globals
 
 #define macro_region_create_with_autodestroy(parent, child, LGRect) \

@@ -304,7 +304,27 @@ short inv_last_page = INV_BLANK_PAGE;
 
 LGRegion *inventory_region;
 extern LGRegion *inventory_region_game, *inventory_region_full;
-LGRegion **all_inventory_regions[] = {&inventory_region_game, &inventory_region_full};
+
+// Sibling of inventory_region_full covering the SCALED in-game panel.
+// inventory_region_full itself must keep its original fixed rect because
+// wrapper.c's pause menu hit-tests against region->abs; moving it would
+// desync that menu. This second region exists only so clicks in the part
+// of the scaled panel that spills outside the original rect are delivered.
+LGRegion *inventory_scaled_region_full = NULL;
+// The game-screen (non-fullscreen) sibling. Both sets of inventory regions are
+// created separately (the game one at startup, the fullscreen one on each
+// fullscreen entry) and coexist, so each needs its own global -- a single one
+// gets overwritten when entering fullscreen, after which the game-screen extra
+// region stops receiving cursor pushes.
+LGRegion *inventory_scaled_region_game = NULL;
+
+// Regions that share the inventory cursor stack. push_inventory_cursors()
+// pushes the email/log "Page N" cursor onto ALL of these: the extra scaled
+// panel region sits above the original one, so without it the cursor shown
+// over the panel would be the global default instead of the email cursor.
+LGRegion **all_inventory_regions[] = {&inventory_region_game, &inventory_region_full,
+                                      &inventory_scaled_region_game, &inventory_scaled_region_full};
+
 
 #define NUM_INVENT_REGIONS (sizeof(all_inventory_regions) / sizeof(LGRegion **))
 
@@ -328,6 +348,7 @@ LGRegion *pagebutton_region;
 
 // DRAWING STUFF
 grs_bitmap inv_backgnd;
+static size_t inv_backgnd_capacity = 0;   // bytes actually allocated in inv_backgnd.bits
 grs_canvas inv_norm_canvas;
 grs_canvas inv_fullscrn_canvas;
 grs_canvas inv_view360_canvas;
@@ -360,6 +381,185 @@ static char cursor_string_buf[128];
 
 #define INVENT_BUTTON_PANEL_X (-1)
 #define INVENT_BUTTON_PANEL_Y (196 - BUTTON_PANEL_Y)
+
+// ---------------------------------------------------------------------------
+// Fullscreen proportional layout for the inventory panel
+//
+// In fullscreen the panel canvas is sized SCONV_X(W) x SCONV_Y(H) and its
+// contents are drawn with SCONV applied, so it inherits the (non-uniform)
+// SCONV_X/SCONV_Y stretch -- on a 16:9 mode that widens the panel ~33%
+// horizontally. Blit it into a *real-pixel* destination rect that uses a
+// uniform scale (the vertical one) with the 320x200 5:6 pixel aspect on X,
+// centred, so the panel keeps 4:3 proportions. Vertical placement is left
+// unchanged (SCONV_Y is the uniform scale anyway).
+//
+// The input regions must stay in logical space, so their x is back-derived
+// from the real rect with the inverse SCONV; the mouse handlers then map
+// screen-logical x to panel-local x with the same ratio (which collapses to
+// the old "minus INVENTORY_PANEL_X" on the 320x200 game screen).
+// ---------------------------------------------------------------------------
+//static short inv_org_x  = INVENTORY_PANEL_X; // logical left of the region
+//static short inv_org_w  = INVENTORY_PANEL_WIDTH;
+//static int   inv_real_x = 0, inv_real_y = 0, inv_real_w = 0, inv_real_h = 0;
+
+static short inv_org_x  = INVENTORY_PANEL_X; // logical left of the region
+static short inv_org_w  = INVENTORY_PANEL_WIDTH;
+static short inv_org_y  = INVENTORY_PANEL_Y; // logical top of the region
+static short inv_org_h  = INVENTORY_PANEL_HEIGHT;
+static int   inv_real_x = 0, inv_real_y = 0, inv_real_w = 0, inv_real_h = 0;
+
+#define INV_SCALE_W(v) ((v) * inv_real_w / INVENTORY_PANEL_WIDTH)
+#define INV_SCALE_H(v) ((v) * inv_real_h / INVENTORY_PANEL_HEIGHT)
+
+// The block is drawn with a UNIFORM horizontal scale (its own vertical scale,
+// times the 5:6 pixel aspect) instead of the screen's non-uniform SCONV_X. This
+// is done by temporarily swapping convert_x for the block's conversion mode
+// while the block draws -- convert_use_mode is untouched, so the engine still
+// picks the same pre-scaled fonts (double/mega) and the glyphs are never
+// resampled; only the layout is repositioned to the correct proportions.
+static fix inv_block_ux       = FIX_UNIT; // block horizontal scale (fix)
+static fix inv_block_ux_saved = FIX_UNIT;
+static fix inv_block_uy       = FIX_UNIT; // block vertical scale (fix)
+static fix inv_block_uy_saved = FIX_UNIT;
+static int inv_block_depth    = 0;
+
+void inventory_block_scale_begin(void) {
+    extern short gr_string_xscale_pct;
+if (!full_game_3d)
+        return;
+    // Re-entrant: only the outermost begin saves/overrides, so a nested draw
+    // (e.g. an email/MFD draw that re-enters inventory drawing) can't clobber
+    // the saved value and leak the override into the rest of the HUD.
+    if (inv_block_depth++ == 0) {
+        // Swap BOTH scales so the content scales uniformly with the box at any
+        // HUD scale (X-only left the content's Y pinned to the mode's convert_y).
+        inv_block_ux_saved = convert_x[convert_type][convert_use_mode];
+        inv_block_uy_saved = convert_y[convert_type][convert_use_mode];
+        convert_x[convert_type][convert_use_mode] = inv_block_ux;
+        convert_y[convert_type][convert_use_mode] = inv_block_uy;
+        // Block scale is now isotropic, so no string-width compensation.
+        gr_string_xscale_pct = 100;
+    }
+
+}
+
+void inventory_block_scale_end(void) {
+    extern short gr_string_xscale_pct;
+    if (inv_block_depth <= 0)
+        return;
+    if (--inv_block_depth == 0) {
+        convert_x[convert_type][convert_use_mode] = inv_block_ux_saved;
+        convert_y[convert_type][convert_use_mode] = inv_block_uy_saved;
+        gr_string_xscale_pct = 100;
+    }
+}
+
+// Logical x offset that the centred block content is shifted right by. The
+// block *canvas* is blitted at a centred x, but elements drawn directly with the
+// block override (logical 0 -> real 0) must add this offset to land in the same
+// centred place -- e.g. the HUD message line, the biorhythm.
+int inventory_block_dx(void) {
+    int block_w, off_real;
+
+    if (!full_game_3d)
+        return 0;
+
+    block_w = fix_int(fix_mul(fix_make(320, 0), inv_block_ux));
+    off_real = ((int)grd_cap->w - block_w) / 2;
+    if (off_real <= 0)
+        return 0;
+    return fix_int(fix_div(fix_make(off_real, 0), inv_block_ux));
+}
+
+// Exposed for text-layout code (email.c) that accumulates rendered pixel
+// widths and draws at SCONV-mapped positions: dividing those metrics by
+// `real_w / INVENTORY_PANEL_WIDTH` puts them in the same units as the draw
+// positions (identity on the 320x200 game screen).
+int inventory_block_real_w(void) { return inv_real_w; }
+int inventory_block_real_h(void) { return inv_real_h; }
+// Real-pixel top-left of the centred fullscreen inventory block (used by the
+// paused message line in tools.c, which must line up with the panel).
+int inventory_block_real_x(void) { return inv_real_x; }
+int inventory_block_real_y(void) { return inv_real_y; }
+
+// Logical origin/size of the centred fullscreen inventory block (inv_org_*).
+// Used by wrapper.c's pause menu to remap mouse coords onto the bounded panel.
+int inventory_panel_org_x(void) { return inv_org_x; }
+int inventory_panel_org_y(void) { return inv_org_y; }
+int inventory_panel_org_w(void) { return inv_org_w; }
+int inventory_panel_org_h(void) { return inv_org_h; }
+
+static void inventory_recompute_layout(void) {
+    inv_org_x = INVENTORY_PANEL_X;
+    inv_org_w = INVENTORY_PANEL_WIDTH;
+    inv_org_y = INVENTORY_PANEL_Y;
+    inv_org_h = INVENTORY_PANEL_HEIGHT;
+    inv_real_x = SCONV_X(INVENTORY_PANEL_X);
+    inv_real_y = SCONV_Y(INVENTORY_PANEL_Y);
+    inv_real_w = SCONV_X(INVENTORY_PANEL_WIDTH);
+    inv_real_h = SCONV_Y(INVENTORY_PANEL_HEIGHT);
+    inv_block_ux = convert_x[convert_type][convert_use_mode];
+
+    if (!full_game_3d)
+        return;
+
+    {
+        // Use the real framebuffer size, NOT SCONV_X/Y. This function is
+        // called from change_svga_screen_mode() while ss_set_hack_mode(2)
+        // (640x400) is active; SCONV_Y(200) would return 400 there no matter
+        // what the real screen is, throwing off the bottom anchor and every
+        // downstream metric. grd_cap is the physical framebuffer size and is
+        // unaffected by hack mode.
+        int scr_w = grd_cap->w;
+        int scr_h = grd_cap->h;
+        if (scr_w <= 0 || scr_h <= 0)
+            return;
+        extern float hud_scale_factor(void);
+        const float k  = hud_scale_factor();
+        const fix   kf = (fix)(k * 65536.0f);
+
+        // k is now "screen pixels per source pixel" (1.0 == 1:1). The 5:6
+        // pixel aspect is folded into X only, so a square source pixel
+        // stays square on a 5:6 display.
+        const float sy = k;
+        const float sx = sy;
+
+        // Same thing as fix, for the draw-time convert_x/y override.
+        // Fully isotropic (no 5:6 fold) so text, boxes and the panel art all
+        // share one scale; previously X was k*5/6 which squished text and left
+        // string-derived boxes too narrow.
+	inv_block_ux = kf;
+	inv_block_uy = kf;
+        
+	inv_real_w = (int)(INVENTORY_PANEL_WIDTH  * sx + 0.5f);
+        inv_real_h = (int)(INVENTORY_PANEL_HEIGHT * sy + 0.5f);
+        inv_real_x = (scr_w - inv_real_w) / 2;
+
+        // Bottom-anchored: the panel's bottom edge sits at the same *source*
+        // row as it always did. The screen offset is now the source offset
+        // multiplied by sy (no SCONV base), so the panel grows upward from a
+        // fixed bottom when k increases.
+        inv_real_y = scr_h
+                   - (int)((200 - INVENTORY_PANEL_Y - INVENTORY_PANEL_HEIGHT) * sy + 0.5f)
+                   - inv_real_h;
+
+        // Logical rect that SCONV maps exactly onto the real rect.
+        inv_org_x = (short)((float)inv_real_x * 320.0f / (float)scr_w);
+        inv_org_w = (short)((float)inv_real_w * 320.0f / (float)scr_w);
+        inv_org_y = (short)((float)inv_real_y * 200.0f / (float)scr_h);
+        inv_org_h = (short)((float)inv_real_h * 200.0f / (float)scr_h);
+    }
+}
+
+
+// NOTE: the input regions are intentionally NOT moved/resized to the block rect.
+// inventory_region_full / pagebutton_region_full are shared with wrapper.c's
+// pause/options menu, which draws itself through the SCONV-mapped inv_norm_canvas
+// (anchored at INVENTORY_PANEL_*), and hit-tests with a plain "minus region ul"
+// mapping. Moving the regions would desync that menu. Instead the inventory's own
+// mouse handlers remap screen x into panel-local x with the block ratio (below);
+// the wrapper keeps its original INVENTORY_PANEL_X-relative mapping, so it stays
+// aligned with itself.
 
 // ---------------------
 //  Internal Prototypes
@@ -432,7 +632,8 @@ void push_inventory_cursors(LGCursor *newcurs) {
     int i;
 
     for (i = 0; i < NUM_INVENT_REGIONS; i++) {
-        uiPushRegionCursor(*(all_inventory_regions[i]), newcurs);
+        if (*(all_inventory_regions[i]) != NULL)
+            uiPushRegionCursor(*(all_inventory_regions[i]), newcurs);
     }
 }
 
@@ -440,7 +641,8 @@ void pop_inventory_cursors(void) {
     int i;
 
     for (i = 0; i < NUM_INVENT_REGIONS; i++) {
-        uiPopRegionCursor(*(all_inventory_regions[i]));
+        if (*(all_inventory_regions[i]) != NULL)
+            uiPopRegionCursor(*(all_inventory_regions[i]));
     }
 }
 
@@ -981,7 +1183,7 @@ extern uiSlab main_slab;
 
 grs_bitmap grenade_bmap;
 #ifdef SVGA_SUPPORT
-char grenade_bmap_buffer[8700];
+char grenade_bmap_buffer[32000];
 #else
 char grenade_bmap_buffer[700];
 #endif
@@ -1941,11 +2143,17 @@ errtype inventory_clear(void) {
         r.ul.y = INVENTORY_PANEL_Y;
         r.lr.x = INVENTORY_PANEL_X + INVENTORY_PANEL_WIDTH;
         r.lr.y = INVENTORY_PANEL_Y + INVENTORY_PANEL_HEIGHT;
-        if (dirty_inv_canvas) {
-            FrameDesc *f = RefGet(REF_IMG_bmBlankInventoryPanel);
-            LG_memcpy(inv_backgnd.bits, f + 1, f->bm.w * f->bm.h);
-            dirty_inv_canvas = FALSE;
-        }
+		if (dirty_inv_canvas) {
+    // Use RefLock/RefUnlock like create_invent_region() does -- RefGet can
+    // return NULL if nothing else is holding the resource, and the old code
+    // dereferenced it unconditionally.
+    			FrameDesc *f = RefLock(REF_IMG_bmBlankInventoryPanel);
+    			if (f) {
+        		LG_memcpy(inv_backgnd.bits, f + 1, f->bm.w * f->bm.h);
+        		RefUnlock(REF_IMG_bmBlankInventoryPanel);
+    		}
+    		dirty_inv_canvas = FALSE;
+	}
         uiHideMouse(&r);
         ss_safe_set_cliprect(0, 0, INVENTORY_PANEL_WIDTH, INVENTORY_PANEL_HEIGHT);
         ss_bitmap(&inv_backgnd, 0, 0);
@@ -1985,6 +2193,10 @@ errtype inventory_draw(void) {
     //   else
     gr2ss_override = OVERRIDE_ALL;
 #endif
+    // Fullscreen: swap in the block's uniform horizontal scale for the duration
+    // of the draw (see inventory_block_scale_begin). Keeps the scaled-font path
+    // and the original layout metrics, just with correct (uniform) proportions.
+    inventory_block_scale_begin();
     if (global_fullmap->cyber)
         inventory_page = INV_SOFTWARE_PAGE;
     if (full)
@@ -1996,6 +2208,9 @@ errtype inventory_draw(void) {
     inventory_draw_page(inventory_page);
 #ifdef SVGA_SUPPORT
     ss_set_hack_mode(0, &temp);
+#endif
+    inventory_block_scale_end();
+#ifdef SVGA_SUPPORT
     gr2ss_override = old_over;
 #endif
     gr_pop_canvas();
@@ -2151,9 +2366,6 @@ uchar inventory_mouse_handler(uiEvent *ev, LGRegion *r, intptr_t data) {
     int i;
     int row = -1;
     extern uchar game_paused;
-#ifdef SVGA_SUPPORT
-    short temp;
-#endif
     if (game_paused)
         return (TRUE);
 
@@ -2169,7 +2381,7 @@ uchar inventory_mouse_handler(uiEvent *ev, LGRegion *r, intptr_t data) {
     } else
 #endif
     {
-        relx = ev->pos.x - INVENTORY_PANEL_X;
+        relx = (ev->pos.x - inv_org_x) * INVENTORY_PANEL_WIDTH / inv_org_w;
     }
     if (invpanel_focus && !(ev->mouse_data.buttons & (1 << MOUSE_RBUTTON))) {
         uiReleaseFocus(r, UI_EVENT_MOUSE_MOVE);
@@ -2185,6 +2397,7 @@ uchar inventory_mouse_handler(uiEvent *ev, LGRegion *r, intptr_t data) {
             short rel_y;
             short x, y;
             short smx, smy;
+            short relx_px, rely_px;
 #ifdef STEREO_SUPPORT
             if (convert_use_mode == 5) {
                 switch (i6d_device) {
@@ -2200,28 +2413,31 @@ uchar inventory_mouse_handler(uiEvent *ev, LGRegion *r, intptr_t data) {
                 }
             } else
 #endif
-                rel_y = ev->pos.y - INVENTORY_PANEL_Y;
+
+            // The click arrives in the screen's 320x200 logical space; the
+            // panel lives at (inv_org_y .. inv_org_y + inv_org_h) in that
+            // space, NOT at INVENTORY_PANEL_Y..+HEIGHT (those constants only
+            // coincide with the panel rect at hudScale == 100). Using the
+            // panel-local constants here made the search band drift with the
+            // HUD scale, so clicks low in the panel looked "empty" and were
+            // silently rejected by the `if (!found) return FALSE` gate.
+            rel_y = ev->pos.y - inv_org_y;
             gr_push_canvas(&inv_fullscrn_canvas);
-            smx = SEARCH_MARGIN;
-            smy = SEARCH_MARGIN;
-#ifdef SVGA_SUPPORT
-            ss_set_hack_mode(2, &temp);
-            ss_point_convert(&smx, &smy, FALSE);
-#endif
-            for (x = relx - smx; !found && x <= relx + smx; x++)
-                for (y = rel_y - smy; !found && y <= rel_y + smy; y++) {
-                    short usex, usey;
-                    usex = x;
-                    usey = y;
-#ifdef SVGA_SUPPORT
-                    ss_point_convert(&usex, &usey, FALSE);
-#endif
-                    if (gr_get_pixel(usex, usey) != 0) // found non-transparent pixel
+            relx_px = (short)((long)relx * inv_real_w / INVENTORY_PANEL_WIDTH);
+            rely_px = (short)((long)rel_y * inv_real_h / inv_org_h);
+            smx = (short)(SEARCH_MARGIN * inv_real_w / INVENTORY_PANEL_WIDTH);
+            smy = (short)(SEARCH_MARGIN * inv_real_h / inv_org_h);
+
+            for (x = relx_px - smx; !found && x <= relx_px + smx; x++) {
+                if (x < 0 || x >= inv_real_w)
+                    continue;
+                for (y = rely_px - smy; !found && y <= rely_px + smy; y++) {
+                    if (y < 0 || y >= inv_real_h)
+                        continue;
+                    if (gr_get_pixel(x, y) != 0) // found non-transparent pixel
                         found = TRUE;
                 }
-#ifdef SVGA_SUPPORT
-            ss_set_hack_mode(0, &temp);
-#endif
+            }
             gr_pop_canvas();
             if (!found) {
                 return FALSE;
@@ -2231,11 +2447,21 @@ uchar inventory_mouse_handler(uiEvent *ev, LGRegion *r, intptr_t data) {
     for (i = 0; gen_inv_page(inventory_page, &i, &dp); i++) {
         if (relx < dp->left || relx > dp->right)
             continue;
-        row = get_item_at_pixrow(dp, ev->pos.y);
+        // Row lookup: get_item_at_pixrow() works in UNSCALED logical space
+        // (it subtracts INVENTORY_PANEL_Y / Y_STEP / dp->top). Map the scaled
+        // click y back into that space first, mirroring the relx mapping above,
+        // so rows track the box at any HUD scale. Identical to ev->pos.y at k=1.
+        {
+        int y_local = (inv_org_h > 0)
+                    ? ((ev->pos.y - inv_org_y) * INVENTORY_PANEL_HEIGHT / inv_org_h)
+                    : 0;
+        row = get_item_at_pixrow(dp, y_local + INVENTORY_PANEL_Y);
+        }
         if (row >= 0) {
             break;
         }
     }
+
     if (input_cursor_mode == INPUT_OBJECT_CURSOR && (ev->mouse_data.action & (MOUSE_LDOWN | MOUSE_RUP | UI_MOUSE_LDOUBLE))) {
         add_object_on_cursor(dp, row);
         return TRUE;
@@ -2268,10 +2494,17 @@ uchar pagebutton_mouse_handler(uiEvent *ev, LGRegion *r, intptr_t data) {
         return FALSE;
     }
 
-    pos.x -= INVENTORY_PANEL_X;
+    pos.x = (ev->pos.x - inv_org_x) * INVENTORY_PANEL_WIDTH / inv_org_w;
     pos.y -= INVENTORY_PANEL_Y;
 
+    // Reject clicks outside the (possibly narrower) centred panel block; the
+    // page-button arrays are indexed by cnum and must stay in range.
+    if (pos.x < 0 || pos.x >= INVENTORY_PANEL_WIDTH)
+        return FALSE;
+
     cnum = (pos.x - FIRST_BTTN_X) / BUTTON_X_STEP;
+    if (cnum < 0 || cnum >= NUM_PAGE_BTTNS)
+        return FALSE;
     if (full_game_3d && global_fullmap->cyber && cnum != INV_SOFTWARE_PAGE) {
         last_invent_cnum = cnum;
         uiSetRegionDefaultCursor(r, NULL);
@@ -2431,6 +2664,8 @@ LGRegion *create_invent_region(LGRegion *root, LGRegion **pbuttons, LGRegion **p
     LGRect invrect;
     LGRegion *invreg = (LGRegion *)malloc(sizeof(LGRegion));
     LGRegion *pagereg = (LGRegion *)malloc(sizeof(LGRegion));
+    inv_backgnd.bits = (uchar *)malloc(MAX_INV_FULL_WD(INV_FULL_WD) * MAX_INV_FULL_HT(grd_cap->h - GAME_MESSAGE_Y));
+    inv_backgnd_capacity = (size_t)MAX_INV_FULL_WD(INV_FULL_WD) * MAX_INV_FULL_HT(grd_cap->h - GAME_MESSAGE_Y);
     FrameDesc *f;
 #ifdef OLD_BUTTON_CURSORS
     LGPoint pt;
@@ -2450,6 +2685,38 @@ LGRegion *create_invent_region(LGRegion *root, LGRegion **pbuttons, LGRegion **p
     uiInstallRegionHandler(invreg, UI_EVENT_MOUSE | UI_EVENT_MOUSE_MOVE, inventory_mouse_handler, 0, &id);
     uiSetRegionDefaultCursor(invreg, NULL);
     add_email_handler(invreg);
+    
+    // Extra region for the scaled in-game panel. Created with the same rect
+    // as invreg so it's harmless until inventory_update_screen_mode() runs;
+    // that function repositions it to match the drawn panel. The same mouse
+    // handler is installed -- its early-out on game_paused keeps the pause
+    // menu's own handler on inventory_region_full in charge when paused.
+    {
+        LGRegion *extreg = (LGRegion *)malloc(sizeof(LGRegion));
+        LGRect extrect = invrect; // same as invreg initially
+        region_create(root, extreg, &extrect, 0, 0,
+                      REG_USER_CONTROLLED | AUTODESTROY_FLAG,
+                      NULL, NULL, NULL, NULL);
+        uiInstallRegionHandler(extreg, UI_EVENT_MOUSE | UI_EVENT_MOUSE_MOVE,
+                               inventory_mouse_handler, 0, &id);
+        uiSetRegionDefaultCursor(extreg, NULL);
+        // Also carry the email/log page handler: outside fullscreen this extra
+        // region is created at the same rect as invreg and sits above it, so it
+        // would otherwise swallow the clicks that advance the email/log text
+        // page ("can't skip pages"). The handler self-guards on
+        // inventory_page == INV_EMAILTEXT_PAGE, so this is inert elsewhere.
+        add_email_handler(extreg);
+        // Track the extra region for the mode this set belongs to (see
+        // all_inventory_regions): the game-screen and fullscreen sets coexist.
+        {
+            extern LGRegion *fullview_region;
+            if (root == fullview_region)
+                inventory_scaled_region_full = extreg;
+            else
+                inventory_scaled_region_game = extreg;
+        }
+    }
+    
     if (pinvent != NULL)
         *pinvent = invreg;
 
@@ -2460,6 +2727,7 @@ LGRegion *create_invent_region(LGRegion *root, LGRegion **pbuttons, LGRegion **p
     uiInstallRegionHandler(pagereg, (UI_EVENT_MOUSE | UI_EVENT_MOUSE_MOVE), pagebutton_mouse_handler,
                            0, &id);
     uiSetRegionDefaultCursor(pagereg, &globcursor);
+
 
     if (pbuttons != NULL)
         *pbuttons = pagereg;
@@ -2508,12 +2776,56 @@ LGRegion *create_invent_region(LGRegion *root, LGRegion **pbuttons, LGRegion **p
 }
 
 errtype inventory_update_screen_mode() {
+    inventory_recompute_layout();
+
+    // The scaled in-game panel lives at (inv_org_x, inv_org_y, inv_org_w,
+    // inv_org_h) in logical space. Point the extra region at that rect so
+    // clicks in the panel actually reach inventory_mouse_handler. Leave the
+    // original region alone: the pause menu depends on its fixed position.
+    if (full_game_3d && inventory_scaled_region_full) {
+        region_move(inventory_scaled_region_full, inv_org_x, inv_org_y, 2);
+        region_resize(inventory_scaled_region_full, inv_org_w, inv_org_h);
+    }
+
     if (convert_use_mode) {
-        gr_init_sub_canvas(grd_scr_canv, &inv_norm_canvas, SCONV_X(INVENTORY_PANEL_X), SCONV_Y(INVENTORY_PANEL_Y),
-                           SCONV_X(INVENTORY_PANEL_WIDTH), SCONV_Y(INVENTORY_PANEL_HEIGHT));
         if (full_game_3d) {
-            gr_init_canvas(&inv_fullscrn_canvas, inv_backgnd.bits, BMT_FLAT8, SCONV_X(INVENTORY_PANEL_WIDTH),
-                           SCONV_Y(INVENTORY_PANEL_HEIGHT));
+            // The pause menu (wrapper panel) draws into inv_norm_canvas; place it
+            // over the centred uniform inventory rect so the pause menu lines up
+            // with the bounded in-game HUD instead of the stretched SCONV rect.
+            gr_init_sub_canvas(grd_scr_canv, &inv_norm_canvas, inv_real_x, inv_real_y, inv_real_w, inv_real_h);
+        } else {
+            gr_init_sub_canvas(grd_scr_canv, &inv_norm_canvas, SCONV_X(INVENTORY_PANEL_X), SCONV_Y(INVENTORY_PANEL_Y),
+                               SCONV_X(INVENTORY_PANEL_WIDTH), SCONV_Y(INVENTORY_PANEL_HEIGHT));
+        }
+        if (full_game_3d) {
+
+    if (full_game_3d) {
+    // The background buffer is shared by inv_fullscrn_canvas (sized by the
+    // HUD scale) and inv_view360_canvas (sized by SCONV). The original
+    // allocation used MAX_INV_FULL_WD/HT, which caps at 1024 pixels wide
+    // regardless of screen resolution -- so on any screen wider than 1024,
+    // the view360 canvas already overran it, and high hudScale makes the
+    // fullscreen canvas overrun too. Grow the buffer whenever either canvas
+    // needs more than we have.
+        size_t need_full = (size_t)inv_real_w * (size_t)inv_real_h;
+        size_t need_360  = (size_t)SCONV_X(INV_FULL_WD) * (size_t)SCONV_Y(INV_FULL_HT);
+        size_t need = need_full > need_360 ? need_full : need_360;
+        if (need > inv_backgnd_capacity) {
+            uchar *newbits = (uchar *)realloc(inv_backgnd.bits, need);
+            if (!newbits) {
+                critical_error(0x3007);   // out of memory, or a code you already have
+            }
+            inv_backgnd.bits = newbits;
+            inv_backgnd_capacity = need;
+            dirty_inv_canvas = TRUE;      // re-copy the source art into the new buffer
+        }
+     }
+
+            // Uniform-scaled block canvas: drawn with convert_x swapped to the
+            // block's uniform scale (see inventory_block_scale_begin) and blitted
+            // 1:1, so it keeps correct proportions AND the engine's scaled fonts.
+            gr_init_canvas(&inv_fullscrn_canvas, inv_backgnd.bits, BMT_FLAT8, inv_real_w,
+                           inv_real_h);
             // gr_init_canvas(&inv_fullscrn_canvas, inv_backgnd.bits, BMT_FLAT8, 290, 120);
             gr_init_canvas(&inv_view360_canvas, inv_backgnd.bits, BMT_FLAT8, SCONV_X(INV_FULL_WD),
                            SCONV_Y(INV_FULL_HT));
@@ -2561,9 +2873,12 @@ errtype inventory_update_screen_mode() {
 }
 
 void inv_change_fullscreen(uchar on) {
+
+    dirty_inv_canvas = TRUE;
     if (on) {
         pinv_canvas = &inv_fullscrn_canvas;
         ppage_canvas = &inv_fullpage_canvas;
+
         gr_push_canvas(pinv_canvas);
         gr_clear(0);
         gr_pop_canvas();
@@ -2614,7 +2929,10 @@ void inv_update_fullscreen(uchar full) {
                      }
                      else
              */
-            ss_noscale_bitmap(&(inv_fullscrn_canvas.bm), INVENTORY_PANEL_X, INVENTORY_PANEL_Y);
+            if (full_game_3d)
+                gr_bitmap(&(inv_fullscrn_canvas.bm), inv_real_x, inv_real_y);
+            else
+                ss_noscale_bitmap(&(inv_fullscrn_canvas.bm), INVENTORY_PANEL_X, INVENTORY_PANEL_Y);
             inv_fullscrn_canvas.bm.flags &= ~BMF_TRANS;
         }
 #else
@@ -2623,7 +2941,10 @@ void inv_update_fullscreen(uchar full) {
         } else {
             inv_fullscrn_canvas.bm.flags |= BMF_TRANS;
             //         ss_bitmap(&(inv_fullscrn_canvas.bm),INVENTORY_PANEL_X,INVENTORY_PANEL_Y);
-            ss_noscale_bitmap(&(inv_fullscrn_canvas.bm), INVENTORY_PANEL_X, INVENTORY_PANEL_Y);
+            if (full_game_3d)
+                gr_bitmap(&(inv_fullscrn_canvas.bm), inv_real_x, inv_real_y);
+            else
+                ss_noscale_bitmap(&(inv_fullscrn_canvas.bm), INVENTORY_PANEL_X, INVENTORY_PANEL_Y);
             inv_fullscrn_canvas.bm.flags &= ~BMF_TRANS;
         }
 #endif
@@ -2636,7 +2957,14 @@ void inv_update_fullscreen(uchar full) {
                              BUTTON_PANEL_Y + bm->h);
     }
 
-    if (convert_use_mode == 3) {
+    if (full_game_3d) {
+        // PAR-corrected, left-aligned with the panel (see inventory_recompute_layout).
+//        gr_scale_bitmap(bm, inv_real_x, SCONV_Y(BUTTON_PANEL_Y), INV_SCALE_W(bm->w), INV_SCALE_H(bm->h));
+	int btn_h  = INV_SCALE_H(bm->h);        // real-pixel height of the button strip
+	int btn_y  = (int)grd_cap->h - btn_h / 2;  // top half visible, bottom half clipped
+	gr_scale_bitmap(bm, inv_real_x, btn_y, INV_SCALE_W(bm->w), btn_h);
+
+    } else if (convert_use_mode == 3) {
         // CC - something about this in 640x480 mode does not scale correctly
         gr_bitmap(bm, 172, 470); // KLC - was ss_bitmap (with scaling)
     } else {

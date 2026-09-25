@@ -63,9 +63,9 @@ int g3_clip_line(g3s_point *src[], g3s_point *dest[]) {
     int i, j;
     byte cc;
     byte ca;
-    // assume 10 points max
-    g3s_point *tmp0[10];
-    g3s_point *tmp1[10];
+    // size for the input count plus the clip planes rather than assuming 10
+    g3s_point *tmp0[16];
+    g3s_point *tmp1[16];
     int b;            // current destination buffer
     g3s_point **tmps; // pointer to the tmp buffer
     g3s_point **tmpd; // pointer to dest buffer
@@ -268,9 +268,10 @@ int g3_clip_line(g3s_point *src[], g3s_point *dest[]) {
 int g3_clip_polygon(int n, g3s_point *src[], g3s_point *dest[]) {
     int i, j, k;
     byte cc;
-    // assume 10 points max
-    g3s_point *tmp0[10];
-    g3s_point *tmp1[10];
+    // clip can add up to one vertex per clip plane, so size the scratch
+    // buffers for the input count plus the planes instead of assuming 10.
+    g3s_point *tmp0[16];
+    g3s_point *tmp1[16];
     int b;            // current destination buffer
     g3s_point **tmps; // pointer to the tmp buffer
     g3s_point **tmpd; // pointer to dest buffer

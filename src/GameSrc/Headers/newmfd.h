@@ -46,5 +46,10 @@ uchar mfd_scan_opacity(int mfd_id, LGPoint epos);
 errtype mfd_update_screen_mode();
 void mfd_zoom_rect(LGRect *start, int mfdnum);
 void mfd_language_change(void);
+// Fullscreen HUD scale (percent, snapped to whole tiers) and HUD bounds
+// (0=off, 1=4:3, 2=16:9, 3=custom cw:ch). Both re-lay-out and redraw the HUD.
+void mfd_set_hud_scale(short pct);
+void hud_bounds_set(short mode, short cw, short ch);
+void hud_bounds_apply(void);
 
 #endif // NEWMFD_H

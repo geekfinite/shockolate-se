@@ -291,6 +291,8 @@ g3s_phandle g3_dup_point(g3s_phandle p) // makes copy of a point
 {
     g3s_point *destPtr;
 
+    if (!first_free) // pool exhausted: fail instead of corrupting the free list
+        return (0L);
     destPtr = first_free;
     first_free = destPtr->next;
 
