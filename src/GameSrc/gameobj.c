@@ -618,7 +618,17 @@ void _fr_draw_bitmap(grs_bitmap *draw_bm, int dist, int sc, int anch_x, int anch
             if (bitmap_verts[i]->y > ry)
                 ry = bitmap_verts[i]->y;
         }
-        SET_HUDOBJ_RECT(_fr_cobj - objs, fix_int(lx), fix_int(ly), fix_int(rx), fix_int(ry));
+        // The projected x-extent is stretched by the viewport aspect, but the
+        // sprite is rasterized at its native aspect.  Derive the box width from
+        // the sprite's own w/h so the box matches the sprite at any resolution.
+        {
+            int hpx = fix_int(ry) - fix_int(ly);
+            int wpx = (draw_bm->h > 0) ? (hpx * draw_bm->w / draw_bm->h) : hpx;
+            int uxh = fix_int(rx);
+            int uxl = uxh - wpx;
+            SET_HUDOBJ_RECT(_fr_cobj - objs, uxl, fix_int(ly), uxh, fix_int(ry));
+        }
+//        SET_HUDOBJ_RECT(_fr_cobj - objs, fix_int(lx), fix_int(ly), fix_int(rx), fix_int(ry));
     }
     g3_free_point(anchor);
 }

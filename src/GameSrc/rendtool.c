@@ -476,26 +476,8 @@ void game_fr_reparam(int is_128s, int full_scrn, int show_all) {
         _frp.view.radius = 13;
         break;
     case 0: {
-        extern short global_fov;
-        float k;
-        int r;
-
         _fr_glob_flags &= ~FR_SHOWALL_MASK;
-
-        // The view/gathering radius is in world units and was tuned for the
-        // original view. A wider FOV reaches further along the screen edges, so
-        // walls beyond a fixed radius drop out of the view cone and the level
-        // shows black gaps at the left and right (they shrink/disappear as the
-        // FOV is narrowed). Scale the radius with the horizontal FOV.
-        k = (float)global_fov / 80.0f; // 80 deg was the original default
-        if (k < 1.0f)
-            k = 1.0f;
-        if (k > 3.0f)
-            k = 3.0f;
-        r = (int)(18.0f * k + 0.5f);
-        if (r > 255)
-            r = 255;
-        _frp.view.radius = (uchar)r;
+        _frp.view.radius = 18;
         break;
     }
     }

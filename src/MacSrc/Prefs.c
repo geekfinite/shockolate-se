@@ -149,7 +149,7 @@ void SetDefaultPrefs(void) {
 	gShockPrefs.doFov = 80;
 	global_fov = gShockPrefs.doFov;
 	saved_fov = gShockPrefs.doFov;
-        gShockPrefs.hudScale = 100;
+        gShockPrefs.hudScale = 200;
         gShockPrefs.hudBoundMode = 0;     // off: HUD spans the full width
         gShockPrefs.hudBoundCustomW = 21; // ratio used when the mode is "custom"
         gShockPrefs.hudBoundCustomH = 9;
@@ -296,8 +296,8 @@ int16_t LoadPrefs(void) {
 			// MFD). Accepting both keeps existing prefs files working; the keys
 			// are never written together.
 			int scale = atoi(value);
-			if (scale < 100)
-				scale = 100;
+			if (scale < 200)
+				scale = 200;
 			if (scale > 1600)
 				scale = 1600;
 			gShockPrefs.hudScale = (short)scale;
