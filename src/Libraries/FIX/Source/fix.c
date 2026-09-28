@@ -146,7 +146,7 @@ fix fix_div(fix a, fix b) {
     if (r64 != (int64_t)r32) {
         gOVResult = 1;
         fix r = 0x7FFFFFFF;
-        if (a >= 0) {
+        if (r64 >= 0) {
             return r;
         }
         return -r;

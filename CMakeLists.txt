@@ -20,8 +20,14 @@ set(CMAKE_C_STANDARD 99)
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g ")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -D__STDC_LIMIT_MACROS")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -march=i686 -mtune=generic ")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -D__STDC_LIMIT_MACROS -march=i686 -mtune=generic")
+
+# Static linking for MinGW to avoid DLL dependencies
+if(MINGW)
+	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -static-libgcc -static-libstdc++")
+	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -static-libgcc -static-libstdc++")
+endif(MINGW)
 
 option(ENABLE_EXAMPLES "Enable example applications" OFF)
 add_feature_info(ENABLE_EXAMPLES ENABLE_EXAMPLES "Enable example application (can be broken!)")
@@ -392,6 +398,8 @@ add_library(GAME_LIB ${GAME_SRC})
 # MINGW additional linker options
 if(MINGW)
 	set(WINDOWS_LIBRARIES "mingw32 -mwindows")
+	# Windows 7 compatibility (6.1)
+	add_definitions(-D_WIN32_WINNT=0x0601 -DWINVER=0x0601)
 endif(MINGW)
 
 target_link_libraries(systemshock
