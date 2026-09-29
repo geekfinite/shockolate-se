@@ -39,6 +39,9 @@ typedef struct {
     bool goCaptureMouse;
     bool goInvertMouseY;
 	bool goPersistMLook;
+	bool goSwapMouseButtons; // swap the left/right mouse button actions
+	int goMouseScheme;       // 0 = Classic, 1 = SS2-like
+	int goSSPickupKey;       // SS2-like: container pickup on 0 = Use, 1 = Action
 
     // Sound Options
     bool soBackMusic;

@@ -130,6 +130,16 @@ enum TEMP_STR_ {
     REF_STR_HUDScale,
     REF_STR_HUDScale_Value,
 
+    REF_STR_SwapButtons    = 0x13000000,
+    REF_STR_ActionRMB,
+    REF_STR_ActionLMB,
+    REF_STR_Scheme,
+    REF_STR_SchemeClassic,
+    REF_STR_SchemeSS2,
+    REF_STR_PickupKey,
+    REF_STR_PickupUse,
+    REF_STR_PickupAction,
+
     REF_STR_Seqer    = 0x20000000,
     REF_STR_ADLMIDI,
     REF_STR_NativeMI,

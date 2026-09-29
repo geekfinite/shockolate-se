@@ -93,6 +93,9 @@ static const char *PREF_ALOG_SETTING = "alog-setting";
 static const char *PREF_MIDI_BACKEND = "midi-backend";
 static const char *PREF_MIDI_OUTPUT = "midi-output";
 static const char *PREF_PERSIST_MLOOK = "persist-mouselook";
+static const char *PREF_SWAP_MOUSE = "swap-mouse-buttons";
+static const char *PREF_MOUSE_SCHEME = "mouse-scheme";
+static const char *PREF_SS_PICKUP_KEY = "ss-pickup-key";
 static const char *PREF_FOV = "fov";
 static const char *PREF_FULLSCREEN = "fullscreen";
 static const char *PREF_HUD_SCALE = "hud-scale";
@@ -146,6 +149,9 @@ void SetDefaultPrefs(void) {
     audiolog_setting = 1;
 
 	gShockPrefs.goPersistMLook = false;
+	gShockPrefs.goSwapMouseButtons = false;
+	gShockPrefs.goMouseScheme = 0;
+	gShockPrefs.goSSPickupKey = 0;
 	gShockPrefs.doFov = 80;
 	global_fov = gShockPrefs.doFov;
 	saved_fov = gShockPrefs.doFov;
@@ -281,6 +287,16 @@ int16_t LoadPrefs(void) {
 		}
 		else if (strcasecmp(key, PREF_PERSIST_MLOOK) == 0) {
 			gShockPrefs.goPersistMLook = is_true(value);
+		} else if (strcasecmp(key, PREF_SWAP_MOUSE) == 0) {
+			gShockPrefs.goSwapMouseButtons = is_true(value);
+		} else if (strcasecmp(key, PREF_MOUSE_SCHEME) == 0) {
+			int ms = atoi(value);
+			if (ms >= 0 && ms <= 1)
+				gShockPrefs.goMouseScheme = ms;
+		} else if (strcasecmp(key, PREF_SS_PICKUP_KEY) == 0) {
+			int pk = atoi(value);
+			if (pk >= 0 && pk <= 1)
+				gShockPrefs.goSSPickupKey = pk;
 		} else if (strcasecmp(key, PREF_FOV) == 0) {
 			int fov = atoi(value);
 			if (fov < min_fov)
@@ -358,6 +374,9 @@ int16_t SavePrefs(void) {
     fprintf(f, "%s = %d\n", PREF_MIDI_BACKEND, gShockPrefs.soMidiBackend);
     fprintf(f, "%s = %d\n", PREF_MIDI_OUTPUT, gShockPrefs.soMidiOutput);
 	fprintf(f, "%s = %s\n", PREF_PERSIST_MLOOK, gShockPrefs.goPersistMLook ? "yes" : "no");
+	fprintf(f, "%s = %s\n", PREF_SWAP_MOUSE, gShockPrefs.goSwapMouseButtons ? "yes" : "no");
+	fprintf(f, "%s = %d\n", PREF_MOUSE_SCHEME, gShockPrefs.goMouseScheme);
+	fprintf(f, "%s = %d\n", PREF_SS_PICKUP_KEY, gShockPrefs.goSSPickupKey);
 	fprintf(f, "%s = %d\n", PREF_FOV, gShockPrefs.doFov);
 	fprintf(f, "%s = %d\n", PREF_HUD_SCALE, gShockPrefs.hudScale);
 	{
@@ -595,6 +614,8 @@ extern uchar toggle_up_level_func(ushort keycode, uint32_t context, intptr_t dat
 extern uchar toggle_down_level_func(ushort keycode, uint32_t context, intptr_t data);
 // quick-use hotkey
 extern uchar quick_use(ushort keycode, uint32_t context, intptr_t data);
+// quick grenade hotkey
+extern uchar quick_grenade_hotkey(ushort keycode, uint32_t context, intptr_t data);
 
 #define TAB_KEY (KEY_TAB | KB_FLAG_DOWN)
 #define S_TAB_KEY (KEY_TAB | KB_FLAG_DOWN | KB_FLAG_SHIFT)
@@ -618,9 +639,9 @@ HOTKEYLOOKUP HotKeyLookup[] = {
 #ifdef AUDIOLOGS
     {"\"audiolog_cancel\"", DEMO_CONTEXT, audiolog_cancel_func, 0, 0, CTRL('.'), 0},
 #endif
-    {"\"stand\"", DEMO_CONTEXT, posture_hotkey_func, 0, 0, DOWN('t'), SHIFT('t')},
-    {"\"crouch\"", DEMO_CONTEXT, posture_hotkey_func, 1, 0, DOWN('g'), SHIFT('g')},
-    {"\"prone\"", DEMO_CONTEXT, posture_hotkey_func, 2, 0, DOWN('b'), SHIFT('b')},
+    {"\"stand\"", DEMO_CONTEXT, posture_hotkey_func, 0, 0, DOWN('y'), SHIFT('y')},
+    {"\"crouch\"", DEMO_CONTEXT, posture_hotkey_func, 1, 0, DOWN('h'), SHIFT('h')},
+    {"\"prone\"", DEMO_CONTEXT, posture_hotkey_func, 2, 0, DOWN('n'), SHIFT('n')},
     {"\"toggle_freelook\"", DEMO_CONTEXT, toggle_mouse_look, TRUE, 0, DOWN('f'), 0},
     {"\"full_view\"", DEMO_CONTEXT, change_mode_func, FULLSCREEN_LOOP, 0, CTRL('f'), 0},
     {"\"normal_view\"", DEMO_CONTEXT, change_mode_func, GAME_LOOP, 0, CTRL('d'), 0},
@@ -643,7 +664,8 @@ HOTKEYLOOKUP HotKeyLookup[] = {
     {"\"cycle_detail\"", DEMO_CONTEXT, MacDetailFunc, 0, 0, CTRL('1'), 0},
     {"\"toggle_opengl\"", EVERY_CONTEXT, toggle_opengl_func, 0, 0, CTRL('g'), 0},
     {"\"arm_grenade\"", DEMO_CONTEXT, arm_grenade_hotkey, 0, 0, ALT('\''), 0},
-    {"\"use_drug\"", DEMO_CONTEXT, use_drug_hotkey, 0, 0, ALT(';'), 0},
+    {"\"use_drug\"", DEMO_CONTEXT, use_drug_hotkey, 0, 0, DOWN('m'), 0},
+    {"\"quick_grenade\"", DEMO_CONTEXT, quick_grenade_hotkey, 0, 0, DOWN('g'), 0},
     {"\"hud_color\"", DEMO_CONTEXT, hud_color_bank_cycle, 0, 0, ALT('h'), 0},
     {"\"showhelp\"", DEMO_CONTEXT, olh_overlay_func, (intptr_t)&olh_overlay_on, 0, ALT('o'), 0},    
     {"\"bio scan\"", DEMO_CONTEXT, hw_hotkey_callback, 5, 0, 49, 0},

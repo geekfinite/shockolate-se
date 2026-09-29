@@ -1300,6 +1300,40 @@ uchar grenade_use_func(inv_display *dp, int row) {
     return (TRUE);
 }
 
+// Quick grenade: first press grabs the currently selected grenade from the
+// inventory into hand (unarmed); a second press activates (arms) it.
+uchar quick_grenade_hotkey(ushort keycode, uint32_t context, intptr_t data) {
+#ifndef NO_DUMMIES
+    uint32_t dummy;
+    dummy = context + keycode + (uint32_t)data;
+#endif
+    // Second press: a grenade is already in hand -> activate it.
+    if (activate_grenade_on_cursor())
+        return TRUE;
+
+    // First press: grab the selected grenade.
+    {
+        int itemnum = player_struct.actives[ACTIVE_GRENADE];
+        ubyte *quant = player_struct.grenades;
+        ObjID obj;
+        if (itemnum == 0xFF || itemnum >= NUM_GRENADES || quant[itemnum] == 0)
+            return TRUE;
+        quant[itemnum]--;
+        obj = obj_create_base(nth_after_triple(GREN_TRIP, itemnum));
+        if (obj == OBJ_NULL) {
+            quant[itemnum]++;
+            return TRUE;
+        }
+        if (player_struct.actives[ACTIVE_GRENADE] == itemnum && quant[itemnum] == 0) {
+            player_struct.actives[ACTIVE_GRENADE] = 0xFF;
+            set_inventory_mfd(MFD_INV_GRENADE, MFD_INV_NOTYPE, FALSE);
+        }
+        INVENT_CHANGED;
+        push_cursor_object(obj);
+    }
+    return TRUE;
+}
+
 ubyte grenade_add_func(inv_display *dp, int row, ObjID *idP, uchar select) {
     ObjSpecID sid = objs[*idP].specID;
     play_digi_fx(SFX_INVENT_ADD, 1);

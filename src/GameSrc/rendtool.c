@@ -467,6 +467,8 @@ void game_fr_startup(void) {
 void game_fr_shutdown(void) {}
 
 //#pragma disable_message(202)
+extern short global_fov;
+
 void game_fr_reparam(int is_128s, int full_scrn, int show_all) {
     if (is_128s != -1)
         fr_get_tmap = is_128s ? game_fr_tmap_128 : game_fr_tmap_64;
@@ -477,7 +479,23 @@ void game_fr_reparam(int is_128s, int full_scrn, int show_all) {
         break;
     case 0: {
         _fr_glob_flags &= ~FR_SHOWALL_MASK;
-        _frp.view.radius = 18;
+        // Rendering distance: the classic radius (18 tiles) was tuned for the
+        // original narrow FOV. The modern view zooms out by tan(fov/2), which
+        // makes the circular cutoff sit much closer on screen -- scale the
+        // radius with that same factor plus headroom, centered on the
+        // original value (36 = 2 x 18), clamped to sane bounds.
+        {
+            fix sin_a, cos_a, th;
+            long r;
+            fix_sincos(build_fix_angle(global_fov) >> 1, &sin_a, &cos_a);
+            th = fix_div(sin_a, cos_a); // tan(fov/2)
+            r = (long)(36.0f * fix_float(th));
+            if (r < 18)
+                r = 18;
+            if (r > 64)
+                r = 64;
+            _frp.view.radius = (uchar)r;
+        }
         break;
     }
     }

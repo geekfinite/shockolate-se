@@ -44,6 +44,9 @@ void get_mouselook_vel(int *vx, int *vy);
 
 int mlook_enabled = FALSE;
 
+// SS2-like scheme: remember the menu-mode cursor position across shoot mode.
+static short mlook_saved_cursor_x = -1, mlook_saved_cursor_y = -1;
+
 void mouse_look_physics() {
 
     if (game_paused || !global_fullmap || !mlook_enabled)
@@ -90,10 +93,18 @@ void mouse_look_physics() {
 
 bool TriggerRelMouseMode = FALSE;
 
+// SS2-like cursor memory: skip the first absolute mouse sync after restoring
+// the remembered position (it would overwrite it with the stale OS position).
+bool mlook_skip_abs_sync = FALSE;
+
 void mouse_look_toggle(void) {
     mlook_enabled = !mlook_enabled;
 
     if (mlook_enabled) {
+        // SS2-like: remember where the cursor was in menu mode.
+        if (gShockPrefs.goMouseScheme == 1)
+            mouse_get_xy(&mlook_saved_cursor_x, &mlook_saved_cursor_y);
+
         SDL_SetRelativeMouseMode(SDL_TRUE);
 
         // throw away this first relative mouse reading
@@ -102,9 +113,18 @@ void mouse_look_toggle(void) {
     } else {
         SDL_SetRelativeMouseMode(SDL_FALSE);
 
-        int w, h;
-        SDL_GetWindowSize(window, &w, &h);
-        SDL_WarpMouseInWindow(window, w / 2, h / 2);
+        if (gShockPrefs.goMouseScheme == 1 && mlook_saved_cursor_x >= 0) {
+            // SS2-like: restore the remembered menu-mode cursor position.
+            SDL_WarpMouseInWindow(window, mlook_saved_cursor_x, mlook_saved_cursor_y);
+            // Also set the game's own tracked position immediately, so the
+            // drawn cursor is correct even before the warp's event lands.
+            mouse_put_xy(mlook_saved_cursor_x, mlook_saved_cursor_y);
+            mlook_skip_abs_sync = TRUE;
+        } else {
+            int w, h;
+            SDL_GetWindowSize(window, &w, &h);
+            SDL_WarpMouseInWindow(window, w / 2, h / 2);
+        }
 
         TriggerRelMouseMode = TRUE;
     }
@@ -116,9 +136,18 @@ void mouse_look_off(void) {
 
         SDL_SetRelativeMouseMode(SDL_FALSE);
 
-        int w, h;
-        SDL_GetWindowSize(window, &w, &h);
-        SDL_WarpMouseInWindow(window, w / 2, h / 2);
+        if (gShockPrefs.goMouseScheme == 1 && mlook_saved_cursor_x >= 0) {
+            // SS2-like: restore the remembered menu-mode cursor position.
+            SDL_WarpMouseInWindow(window, mlook_saved_cursor_x, mlook_saved_cursor_y);
+            // Also set the game's own tracked position immediately, so the
+            // drawn cursor is correct even before the warp's event lands.
+            mouse_put_xy(mlook_saved_cursor_x, mlook_saved_cursor_y);
+            mlook_skip_abs_sync = TRUE;
+        } else {
+            int w, h;
+            SDL_GetWindowSize(window, &w, &h);
+            SDL_WarpMouseInWindow(window, w / 2, h / 2);
+        }
 
         TriggerRelMouseMode = TRUE;
     }
@@ -126,6 +155,11 @@ void mouse_look_off(void) {
 
 void mouse_look_unpause(void) {
     if (mlook_enabled) {
+        // SS2-like: shoot mode again after a pause -- refresh the remembered
+        // menu-mode cursor position.
+        if (gShockPrefs.goMouseScheme == 1)
+            mouse_get_xy(&mlook_saved_cursor_x, &mlook_saved_cursor_y);
+
         SDL_SetRelativeMouseMode(SDL_TRUE);
 
         // throw away this first relative mouse reading

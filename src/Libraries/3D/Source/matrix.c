@@ -313,6 +313,20 @@ void scale_view_matrix(void) {
     else
         _matrix_scale.gY = fix_div(_matrix_scale.gY, temp_long);
 
+    // Match the classic OpenGL renderer's zoom: that path re-projected the
+    // already-scaled coordinates with an extra 1/tan(fov/2) factor, i.e. it
+    // showed tan(fov/2) times more world than the raw +-1 cone (the current
+    // horizontal edge tangent is gZ/gX). Fold that factor into the shared
+    // matrix so BOTH renderers (and the culling pyramid built from it) show
+    // exactly that wider view, consistently.
+    if (_matrix_scale.gX != 0) {
+        fix t_edge = fix_div(_matrix_scale.gZ, _matrix_scale.gX);
+        if (t_edge > 0) {
+            _matrix_scale.gX = fix_div(_matrix_scale.gX, t_edge);
+            _matrix_scale.gY = fix_div(_matrix_scale.gY, t_edge);
+        }
+    }
+
     // now actually scale the matrix
     temp_fix = _matrix_scale.gX;
     vm1 = fix_mul(vm1, temp_fix);

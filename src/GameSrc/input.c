@@ -168,7 +168,7 @@ Ref motion_cursor_ids[] = {
 LGCursor motion_cursors[NUM_MOTION_CURSORS];
 grs_bitmap motion_cursor_bitmaps[NUM_MOTION_CURSORS];
 
-static uchar posture_keys[NUM_POSTURES] = {'t', 'g', 'b'};
+static uchar posture_keys[NUM_POSTURES] = {'y', 'h', 'n'};
 
 int input_cursor_mode = INPUT_NORMAL_CURSOR;
 int throw_oomph = 5;
@@ -1146,6 +1146,10 @@ void init_input(void) {
     uiDoubleClickDelay = 8;
     uiDoubleClickTime = 45;
     uiDoubleClicksOn[MOUSE_LBUTTON] = TRUE; // turn on left double clicks
+    // With swapped mouse buttons the right button carries the use action,
+    // so it needs double-click detection enabled too.
+    if (gShockPrefs.goSwapMouseButtons)
+        uiDoubleClicksOn[MOUSE_RBUTTON] = TRUE;
     uiAltDoubleClick = TRUE;
 
     alloc_cursor_bitmaps();
@@ -1794,6 +1798,15 @@ void view3d_rightbutton_handler(uiEvent *ev, LGRegion *r, view3d_data *data) {
         }
         break;
     }
+
+    if (gShockPrefs.goMouseScheme == 1 && (ev->mouse_data.action & MOUSE_RUP)) {
+        extern int mlook_enabled;
+        if (!mlook_enabled) {
+            // SS2-like: the action button in the world also returns to
+            // shoot mode from use mode (any held item was dropped above).
+            mouse_look_toggle();
+        }
+    }
 }
 
 // ----------------------------------------------------------------
@@ -1908,7 +1921,10 @@ void use_object_in_3d(ObjID obj, bool shifted) {
         if (objs[obj].obclass == CLASS_GRENADE)
             grenade_contact(obj, INT_MAX);
 
-        if (shifted) {
+        if (shifted || gShockPrefs.goMouseScheme == 1) {
+            // Shifted pickup, or the SS2-like scheme: go straight to the
+            // inventory -- no need to leave the shoot view for cursor
+            // placement, so don't drop out of mouselook either.
             absorb_object_on_cursor(0, 0, 0); //parameters unused
         }
 		else if (!gShockPrefs.goPersistMLook)
@@ -2140,6 +2156,11 @@ void view3d_dclick(LGPoint pos, frc *fr, bool shifted) {
         } else if ((short)obj > 0) {
             use_cursor_pos = pos;
             use_object_in_3d(obj, shifted);
+            if (gShockPrefs.goMouseScheme == 1 && input_cursor_mode == INPUT_OBJECT_CURSOR) {
+                // SS2-like: picked up items go straight to the inventory
+                extern void absorb_object_on_cursor(ushort keycode, uint32_t context, intptr_t data);
+                absorb_object_on_cursor(0, 0, 0);
+            }
         } else {
             if (!global_fullmap->cyber) {
                 if (!(_fr_glob_flags & FR_SOLIDFR_STATIC))
@@ -2163,6 +2184,29 @@ uchar quick_use(ushort keycode, uint32_t context, intptr_t data)
 uchar view3d_mouse_handler(uiEvent *ev, LGRegion *r, intptr_t v) {
     static uchar got_focus = FALSE;
     uiMouseData *md = &ev->mouse_data;
+
+    // Mouse options: optionally swap the left/right button actions.
+    if (gShockPrefs.goSwapMouseButtons) {
+        unsigned _act = md->action;
+        unsigned _sw = 0;
+        unsigned _d = _act & (UI_MOUSE_LDOUBLE | UI_MOUSE_RDOUBLE);
+        unsigned _nd = 0;
+        if (_act & MOUSE_LDOWN) _sw |= MOUSE_RDOWN;
+        if (_act & MOUSE_LUP)   _sw |= MOUSE_RUP;
+        if (_act & MOUSE_RDOWN) _sw |= MOUSE_LDOWN;
+        if (_act & MOUSE_RUP)   _sw |= MOUSE_LUP;
+        md->action = (_act & ~(MOUSE_LDOWN | MOUSE_LUP | MOUSE_RDOWN | MOUSE_RUP)) | _sw;
+        if (_d & UI_MOUSE_LDOUBLE) _nd |= UI_MOUSE_RDOUBLE;
+        if (_d & UI_MOUSE_RDOUBLE) _nd |= UI_MOUSE_LDOUBLE;
+        md->action = (md->action & ~(UI_MOUSE_LDOUBLE | UI_MOUSE_RDOUBLE)) | _nd;
+        {
+            unsigned _btn = md->buttons;
+            unsigned _nb = _btn & ~((1u << MOUSE_LBUTTON) | (1u << MOUSE_RBUTTON));
+            if (_btn & (1u << MOUSE_LBUTTON)) _nb |= (1u << MOUSE_RBUTTON);
+            if (_btn & (1u << MOUSE_RBUTTON)) _nb |= (1u << MOUSE_LBUTTON);
+            md->buttons = _nb;
+        }
+    }
     view3d_data *data = (view3d_data*)v;
     uchar retval = TRUE;
     LGPoint pt;
@@ -2237,8 +2281,32 @@ uchar view3d_mouse_handler(uiEvent *ev, LGRegion *r, intptr_t v) {
     }
     if (md->action & MOUSE_LUP && abs(evp.y - data->lastleft.y) < uiDoubleClickTolerance &&
         abs(evp.x - data->lastleft.x) < uiDoubleClickTolerance) {
+        // SS2-like scheme: a single click interacts with world objects
+        // (shift variants are disabled in this scheme).
+        if (gShockPrefs.goMouseScheme == 1) {
+            extern int mlook_enabled;
+            if (!mlook_enabled) {
+                // In use mode, clicking the world returns to shoot mode.
+                // A held item is dropped into the world first.
+                if (object_on_cursor) {
+                    LGPoint pos = MakePoint(_current_view->abs_x + RectWidth(_current_view->r) / 2,
+                                            _current_view->abs_y + RectHeight(_current_view->r) / 2);
+                    ui_mouse_put_xy(pos.x, pos.y);
+#ifdef SVGA_SUPPORT
+                    ss_point_convert(&(pos.x), &(pos.y), FALSE);
+#endif
+                    if (player_throw_object(object_on_cursor, pos.x, pos.y, pos.x, pos.y,
+                                            throw_oomph * FIX_UNIT))
+                        pop_cursor_object();
+                }
+                mouse_look_toggle();
+            } else {
+                view3d_dclick(evp, data->fr, FALSE);
+            }
+            data->lastleft = MakePoint(-100, -100);
+        }
         //make shift+leftclick act as double-leftclick with alternate effects
-        if (md->modifiers & 1) { //shifted click; see sdl_events.c
+        else if (md->modifiers & 1) { //shifted click; see sdl_events.c
             view3d_dclick(evp, data->fr, TRUE); //TRUE indicates shifted
             data->lastleft = MakePoint(-100, -100);
         }
@@ -2294,7 +2362,8 @@ uchar view3d_mouse_handler(uiEvent *ev, LGRegion *r, intptr_t v) {
         ((md->buttons & (1 << MOUSE_RBUTTON)) == 0 && global_fullmap->cyber))
         physics_set_one_control(MOUSE_CONTROL_BANK, CONTROL_ZVEL, 0);
 
-    if (md->action & UI_MOUSE_LDOUBLE) {
+    if (gShockPrefs.goMouseScheme != 1 && (md->action & UI_MOUSE_LDOUBLE)) {
+        // (SS2-like scheme handles interaction on the single click instead)
         // Spew(DSRC_USER_I_Motion,("use this, bay-bee!\n"));
         view3d_dclick(evp, data->fr, FALSE);
         data->lastleft = MakePoint(-100, -100);

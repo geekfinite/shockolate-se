@@ -500,18 +500,16 @@ uchar create_initial_game_func(short undefined1, ulong undefined2, void *undefin
 
     load_dynamic_memory(DYNMEM_ALL);
 
-    // KLC - if not already on, turn on-line help on.
-    if (!olh_active)
-        toggle_olh_func(0, 0, 0);
-
     // Do entry-level triggers for starting level
     // Hmm, do we actually want to call this any time we restore
     // a saved game or whatever?  No, probably not....hmmm.....
 
     do_level_entry_triggers();
 
-    // turn on help overlay.
-    olh_overlay_on = olh_active;
+    // The help overlay (the full-screen controls help image) is no longer
+    // auto-shown when starting a new game; the player can still open it
+    // any time with its hotkey.
+    olh_overlay_on = FALSE;
 
     // Plot timers
 

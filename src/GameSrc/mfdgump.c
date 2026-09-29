@@ -38,6 +38,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "objload.h"
 #include "fullscrn.h"
 #include "gr2ss.h"
+#include "Prefs.h"
 
 #include "cybstrng.h"
 #include "gamescr.h"
@@ -220,6 +221,16 @@ uchar mfd_gump_handler(MFD *m, uiEvent *e) {
     row = (pos.y - FIRST_ITEM_Y) / CONTENTS_HGT;
     row = 2 * row + (pos.x - LEFT_MARGIN) / CONTENTS_WID;
 
+    if (gShockPrefs.goMouseScheme == 1 && (e->mouse_data.action & UI_MOUSE_LDOUBLE) && gump_num_objs > 0) {
+        // SS2-like: a double-click on the container grabs its first item.
+        uchar _dblresult = gump_pickup(0);
+        if (_dblresult) {
+            extern void absorb_object_on_cursor(ushort keycode, uint32_t context, intptr_t data); //see invent.c
+            absorb_object_on_cursor(0, 0, 0); //parameters unused
+        }
+        return TRUE;
+    }
+
 #ifdef RIGHT_BUTTON_GUMP_UI
     if (LAST_INPUT_ROW != 0xFF && row != LAST_INPUT_ROW) {
         if (e->mouse_data.buttons & (1 << MOUSE_RBUTTON)) {
@@ -229,6 +240,27 @@ uchar mfd_gump_handler(MFD *m, uiEvent *e) {
 #endif // RIGHT_BUTTON_GUMP_UI
     if (row < 0 || row >= gump_num_objs)
         return FALSE;
+    if (gShockPrefs.goMouseScheme == 1) {
+        // SS2-like: a single click of the configured button takes the item.
+        unsigned _pickup_btn = gShockPrefs.goSSPickupKey
+                                   ? (gShockPrefs.goSwapMouseButtons ? MOUSE_LDOWN : MOUSE_RDOWN)   // action button
+                                   : (gShockPrefs.goSwapMouseButtons ? MOUSE_RDOWN : MOUSE_LDOWN);   // use button
+        if (e->mouse_data.action & _pickup_btn) {
+            bm = bitmaps_2d[OPNUM(gump_idlist[row])];
+            x = LEFT_MARGIN + ((row % 2 == 0) ? 0 : CONTENTS_WID) + (CONTENTS_WID - bm->w) / 2;
+            y = FIRST_ITEM_Y + ((row / 2 == 0) ? 0 : CONTENTS_HGT) + (CONTENTS_HGT - bm->h) / 2;
+            if (pos.x >= x && pos.x < x + bm->w && pos.y >= y && pos.y < y + bm->h) {
+                // SS2-like: the item goes straight to the inventory
+                uchar result = gump_pickup(row);
+                if (result) {
+                    extern void absorb_object_on_cursor(ushort keycode, uint32_t context, intptr_t data); //see invent.c
+                    absorb_object_on_cursor(0, 0, 0); //parameters unused
+                }
+                return TRUE;
+            }
+            return FALSE;
+        }
+    }
     if (LAST_DOUBLE && (e->mouse_data.action & MOUSE_LUP)) {
         return gump_pickup(row);
     }

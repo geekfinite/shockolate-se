@@ -390,6 +390,15 @@ static char *_get_temp_string(int num) {
         case REF_STR_MousNorm: return "Normal";
         case REF_STR_MousInv:  return "Inverted";
 		case REF_STR_Persist_MLook:  return "Keep MLook";
+		case REF_STR_SwapButtons: return "Swap mouse keys";
+		case REF_STR_ActionRMB: return "RMB";
+		case REF_STR_ActionLMB: return "LMB";
+		case REF_STR_Scheme: return "Scheme";
+		case REF_STR_SchemeClassic: return "Classic";
+		case REF_STR_SchemeSS2: return "SS2-like";
+		case REF_STR_PickupKey: return "Pickup key";
+		case REF_STR_PickupUse: return "Use";
+		case REF_STR_PickupAction: return "Action";
 
 		case REF_STR_Digichan: return "2";
 		case REF_STR_Digichan + 1: return "4";
@@ -1911,6 +1920,12 @@ void olh_dealfunc(uchar olh) {
 }
 #pragma enable_message(202)
 
+// Mouse options: keep right-button double clicks in sync with the swap pref
+// (the right button carries the use action when the buttons are swapped).
+void swapmouse_dealfunc(uchar sw) {
+    uiDoubleClicksOn[MOUSE_RBUTTON] = gShockPrefs.goSwapMouseButtons ? TRUE : FALSE;
+}
+
 #ifdef STEREO_SUPPORT
 #define INITIAL_OCULAR_DIST fix_make(3, 0x4000)
 #endif
@@ -1968,6 +1983,11 @@ void joystick_screen_init(void) {
 void joystick_button_func(uchar butid) { joystick_screen_init(); }
 #pragma enable_message(202)
 
+// SS2-like scheme: the pickup-key option appears in place of the (no longer
+// meaningful) double-click slider, so re-init the screen when the scheme
+// changes.
+void mouse_scheme_dealfunc(uchar scheme) { input_screen_init(); }
+
 void input_screen_init(void) {
     LGRect r;
     char *keys;
@@ -1985,16 +2005,24 @@ void input_screen_init(void) {
     i++;
 
     standard_button_rect(&r, i, 2, 2, 1);
-    multi_init(i, keys[1], REF_STR_OptionsText + 1, REF_STR_MouseHand, REF_STR_HandFeedback,
-               sizeof(player_struct.questvars[MOUSEHAND_QVAR]), &player_struct.questvars[MOUSEHAND_QVAR], 2,
-               mousehand_dealfunc, &r);
+    multi_init(i, keys[1], REF_STR_Scheme, REF_STR_SchemeClassic, ID_NULL,
+               sizeof(gShockPrefs.goMouseScheme), &gShockPrefs.goMouseScheme, 2, mouse_scheme_dealfunc, &r);
     i++;
 
-    standard_slider_rect(&r, i, 2, 1);
-    r.ul.x -= 1;
-    sliderbase = ((r.lr.x - r.ul.x - 3) * (FIX_UNIT / 3)) / USHRT_MAX;
-    slider_init(i, REF_STR_DoubleClick, sizeof(ushort), FALSE, &player_struct.questvars[DCLICK_QVAR], USHRT_MAX,
-                sliderbase, dclick_dealfunc, &r);
+    if (gShockPrefs.goMouseScheme == 1) {
+        // SS2-like: container pickup button choice (replaces the double-click
+        // slider, which is not used in this scheme).
+        standard_button_rect(&r, i, 2, 2, 1);
+        r.ul.x -= 1;
+        multi_init(i, 0, REF_STR_PickupKey, REF_STR_PickupUse, ID_NULL,
+                   sizeof(gShockPrefs.goSSPickupKey), &gShockPrefs.goSSPickupKey, 2, NULL, &r);
+    } else {
+        standard_slider_rect(&r, i, 2, 1);
+        r.ul.x -= 1;
+        sliderbase = ((r.lr.x - r.ul.x - 3) * (FIX_UNIT / 3)) / USHRT_MAX;
+        slider_init(i, REF_STR_DoubleClick, sizeof(ushort), FALSE, &player_struct.questvars[DCLICK_QVAR], USHRT_MAX,
+                    sliderbase, dclick_dealfunc, &r);
+    }
     i++;
 
     standard_button_rect(&r, i, 2, 2, 1);
@@ -2004,8 +2032,8 @@ void input_screen_init(void) {
 
     standard_button_rect(&r, i, 2, 2, 1);
     r.ul.x -= 1;
-    multi_init(i, keys[3], REF_STR_MousLook, REF_STR_MousNorm, ID_NULL,
-               sizeof(gShockPrefs.goInvertMouseY), &gShockPrefs.goInvertMouseY, 2, NULL, &r);
+    multi_init(i, keys[3], REF_STR_SwapButtons, REF_STR_ActionRMB, ID_NULL,
+               sizeof(gShockPrefs.goSwapMouseButtons), &gShockPrefs.goSwapMouseButtons, 2, swapmouse_dealfunc, &r);
     i++;
 
     standard_button_rect(&r, 5, 2, 2, 1);

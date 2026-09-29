@@ -1,32 +1,38 @@
-**Shockolate SE - SHODAN Enhanced**
+# Shockolate SE - SHODAN Enhanced
 
 *based on System Shock Enhanced - based on Shockolate*
 
 Fork of Shockolate Enhanced Edition, implementing (and introducing some more haha) crash fixes and widescreen support.
 
 _SHODAN Enhanced means all the new code is written by AI models._
-_I claim no authorship for said code and intend this to be more of a working blueprint._
+_I claim no authorship for said code and intend this to be a functional blueprint for a clean rewrite._
 
 **Implemented features so far:**
 - **_Widescreen support_** - any aspect ratio, any resolution.
 Default resolutions are: 800x600, 1024x768, 480p, 720p, 900p, 1080p.
-Custom resolutions can be transferred by starting the game through shell with -width and -height keys.
+Custom resolutions can be transferred by starting the game through shell with _-width_ and _-height_ keys.
 - **_HUD scaling_** - integer HUD scaling. That includes fullscreen automap (for ultrawide screen layout is yet to be fixed/bounded).
 - _**HUD bounding**_ - useful for ultrawide monitors. Default is off, toggleable in pause menu between 4:3, 16:9 and 21:9.
 Custom values can be supplied with -hud-bounds key, e.g _-hud-bounds 4:3/16:9/5:2/1.33_
 - _**Custom FOV in OpenGL**_ - aforementioned crash is fixed, sprite positioning fixed.
 - **_Better OpenGL shader_** - original shader repo supplied was way too dark.
+_on a second thought, it might be too bright, cross-checking with SS:EE showed that official port is indeed darker_
 - _**Main menu is always 4:3**_ - it looked stupid being stretched to 5120x1000.
 - **_Multiple crash fixes_** - most of them were tied to tiny buffers.
+- **_System Shock 2-style controls_** - can be enabled in pause menu.
+- **_New key bindings_** - stand, crouch, prone moved to Y, H, N;
+G to grab and arm currently selected grenade;
+M - to apply currently selected patch. (all rebindable in **keybinds.txt**).
 
 **To be implemented:**
 - **_More crash fixes, obviously_** - something makes the game SEGFAULT on exit. Yet to catch that.
 - **_Screen refresh in pause menu and various other cosmetic problems that surfaced with HUD revamp_**
 - **_High-res SS:EE resources_** - yet to touch that.
-- **_Rendering distance_** - doesn't occur that much but holes in 16:9 and wider sometimes become noticeable.
+- **_Autofetching game data if you own the game on Steam._**
 - **_Something else that may come up later_**
 - **_Make building more user-friendly/supply Win32-64 binaries_**
-  
+- **_Tool for rebinding controls/new menu for rebinding controls_** - tool is more likely to happen, menu seems to be rather hard to implement right now. 
+ 
 OG README goes next
 
 System Shock Enhanced - based on Shockolate

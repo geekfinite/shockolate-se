@@ -398,6 +398,7 @@ void SetMouseXY(int mx, int my) {
 void get_mouselook_vel(int *vx, int *vy);
 
 extern bool TriggerRelMouseMode;
+extern bool mlook_skip_abs_sync;
 
 static SDL_bool saved_rel_mouse = FALSE;
 
@@ -789,7 +790,12 @@ void pump_events(void) {
             // call this first; it sets MouseX and MouseY
             if (SDL_GetRelativeMouseMode() == SDL_TRUE)
                 SetMouseXY(MouseX + ev.motion.xrel, MouseY + ev.motion.yrel);
-            else
+            else if (mlook_skip_abs_sync) {
+                // SS2-like: this absolute reading is the stale OS cursor
+                // position from just after leaving shoot mode; keep the
+                // restored menu-mode position instead.
+                mlook_skip_abs_sync = FALSE;
+            } else
                 SetMouseXY(ev.motion.x, ev.motion.y);
 
             ss_mouse_event mouseEvent = {0};
