@@ -39,6 +39,10 @@ extern "C" {
 
 extern SDL_Renderer *renderer;
 extern SDL_Palette *sdlPalette;
+
+extern "C" {
+extern g3s_vector _matrix_scale;
+}
 }
 
 #include <map>
@@ -153,19 +157,23 @@ void opengl_update_fov(float fov_degrees) {
         return;
     }
 
-    float scale = 1.0f / tanf((fov_degrees * 3.14159265358979323846f / 180.0f) / 2.0f);
-    ProjectionMatrix[0] = scale;
-    ProjectionMatrix[5] = scale;
-
-    // Keep ViewMatrix's Z-offset proportionally matched to this scale,
-    // the same ratio it was originally tuned at (-0.01 paired with the
-    // old fixed scale of 1.00876, i.e. FOV 89.5 deg) -- see the comment
-    // on ViewMatrix's declaration. Reduces to exactly -0.01 at 89.5 deg
-    // (the value's original, presumably-correct tuning point) and scales
-    // from there rather than staying frozen while the projection scale
-    // it was matched against moves underneath it.
-    ViewMatrix[14] = -0.01f * (scale / 1.00876f);
-    spriteFovScale = scale / 1.00876f;
+    // ZOOM MATCH: the renderer's matrix scales (gX,gY,gZ) are already baked
+    // into the view-space vertex coordinates, and the software renderer's
+    // screen mapping simply divides by z and normalizes -- i.e. a +/-1 cone
+    // in those coordinates. So the matching GPU projection is scale 1/1;
+    // the FOV and aspect come through the vertex scales automatically.
+    if (_matrix_scale.gX != 0 && _matrix_scale.gY != 0 && _matrix_scale.gZ != 0) {
+        ProjectionMatrix[0] = 1.0f;
+        ProjectionMatrix[5] = 1.0f;
+        ViewMatrix[14] = -0.01f;
+        spriteFovScale = 1.0f;
+    } else {
+        float scale = 1.0f / tanf((fov_degrees * 3.14159265358979323846f / 180.0f) / 2.0f);
+        ProjectionMatrix[0] = scale;
+        ProjectionMatrix[5] = scale;
+        ViewMatrix[14] = -0.01f * (scale / 1.00876f);
+        spriteFovScale = scale / 1.00876f;
+    }
 }
 
 // Identity matrix for sprite rendering
