@@ -2285,10 +2285,7 @@ uchar view3d_mouse_handler(uiEvent *ev, LGRegion *r, intptr_t v) {
         // (shift variants are disabled in this scheme).
         if (gShockPrefs.goMouseScheme == 1) {
             extern int mlook_enabled;
-            if (!mlook_enabled) {
-                // In use mode, clicking the world returns to shoot mode.
-                // A held item is dropped into the world first.
-                if (object_on_cursor) {
+            if (!mlook_enabled && object_on_cursor) {
                     LGPoint pos = MakePoint(_current_view->abs_x + RectWidth(_current_view->r) / 2,
                                             _current_view->abs_y + RectHeight(_current_view->r) / 2);
                     ui_mouse_put_xy(pos.x, pos.y);
@@ -2298,9 +2295,8 @@ uchar view3d_mouse_handler(uiEvent *ev, LGRegion *r, intptr_t v) {
                     if (player_throw_object(object_on_cursor, pos.x, pos.y, pos.x, pos.y,
                                             throw_oomph * FIX_UNIT))
                         pop_cursor_object();
-                }
-                mouse_look_toggle();
-            } else {
+                } else {
+            //    mouse_look_toggle();
                 view3d_dclick(evp, data->fr, FALSE);
             }
             data->lastleft = MakePoint(-100, -100);
