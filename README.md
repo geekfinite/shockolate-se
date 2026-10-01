@@ -30,7 +30,7 @@ M - to apply currently selected patch. (all rebindable in **keybinds.txt**).
 - **_High-res SS:EE resources_** - yet to touch that.
 - **_Autofetching game data if you own the game on Steam._**
 - **_Something else that may come up later_**
-- **_Make building more user-friendly/supply Win32-64 binaries_**
+- **_Make building more user-friendly/supply Win32-64 binaries_** - right now I did a blunder and packed build scripts aim i686 specifically, to build it under Linux/MacOS/whatever else for now use scripts from the original repo
 - **_Tool for rebinding controls/new menu for rebinding controls_** - tool is more likely to happen, menu seems to be rather hard to implement right now. 
  
 OG README goes next
