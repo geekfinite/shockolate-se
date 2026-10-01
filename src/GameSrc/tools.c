@@ -165,8 +165,10 @@ errtype draw_res_bm_core(Ref id, int x, int y, uchar scale) {
     LGRect mouse_rect;
 
     f = RefLock(id);
-    if (f == NULL)
+    if (f == NULL) {
         critical_error(CRITERR_MEM | 9);
+        return (ERR_NULL);
+    }
     mouse_rect.ul.x = x;
     mouse_rect.ul.y = y;
     mouse_rect.lr.x = x + f->bm.w;
@@ -194,8 +196,10 @@ errtype draw_res_bm(Ref id, int x, int y) { return (draw_res_bm_core(id, x, y, T
 // resolution ratio (which is fractional on non-4:3 modes).
 errtype draw_res_bm_iscale(Ref id, int x, int y, int k) {
     FrameDesc *f = RefLock(id);
-    if (f == NULL)
+    if (f == NULL) {
         critical_error(CRITERR_MEM | 9);
+        return (ERR_NULL);
+    }
     if (k < 1)
         k = 1;
     gr_scale_bitmap(&f->bm, x + (SCONV_X(f->bm.w) - f->bm.w * k) / 2,

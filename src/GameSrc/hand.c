@@ -247,15 +247,18 @@ Ref get_handart(int *x_offset, int *y_offset, int *beam_x_offset, short mouse_x,
 
     reset_handart_count(player_struct.actives[ACTIVE_WEAPON]);
 
-    /* KLC - don't need this check
-       prt = ResReadRefTable(HANDART_ID_BASE + HANDART_NUM);
-       if (!(RefIndexValid(prt,frame)))
-       {
-          frame = prt->numRefs - 1;
-          Warning(("ACK PAIN HATE!\n"));
-       }
-       ResFreeRefTable(prt);
-    */
+    // Keep the frame in range: after loading a save or switching weapons the
+    // animation frame can point past the end of handart.res; the invalid ref
+    // used to reach the drawing code and crash there.
+    {
+        RefTable *prt = ResReadRefTable(HANDART_ID_BASE + HANDART_NUM);
+        if (prt != NULL) {
+            if (!RefIndexValid(prt, frame))
+                frame = (ubyte)(prt->numRefs - 1);
+            ResFreeRefTable(prt);
+        }
+    }
+
     return (MKREF((HANDART_ID_BASE + HANDART_NUM), frame));
 }
 
