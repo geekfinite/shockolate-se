@@ -1,3 +1,4 @@
+![Shockolate SE](https://github.com/geekfinite/shockolate-se/blob/master/shockolate%20se%20logo.svg)
 # Shockolate SE - SHODAN Enhanced
 
 *based on System Shock Enhanced - based on Shockolate*
