@@ -1,6 +1,6 @@
-cmake_minimum_required(VERSION 3.1)
+cmake_minimum_required(VERSION 3.10)
 
-project(shockolate VERSION 0.7.8)
+project(shockolate-se VERSION 0.7.91)
 
 include(FeatureSummary)
 
@@ -20,8 +20,18 @@ set(CMAKE_C_STANDARD 99)
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -march=i686 -mtune=generic ")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -D__STDC_LIMIT_MACROS -march=i686 -mtune=generic")
+# Do NOT hard-code a 32-bit CPU model in the global flags. -march=i686 makes gcc abort
+# outright on any x86_64 target with:
+#     cc1.exe: error: CPU you selected does not support x86-64 instruction set
+# The compiler already targets the correct CPU for its own tuple, so no -march is needed.
+# Set -DSHOCKOLATE_TUNE=<cpu> only if you deliberately want to override it.
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -D__STDC_LIMIT_MACROS")
+if(SHOCKOLATE_TUNE)
+	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=${SHOCKOLATE_TUNE} -mtune=generic")
+	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=${SHOCKOLATE_TUNE} -mtune=generic")
+	message(STATUS "CPU tuning forced to -march=${SHOCKOLATE_TUNE}")
+endif()
 
 # Static linking for MinGW to avoid DLL dependencies
 if(MINGW)
@@ -289,6 +299,7 @@ set(GAME_SRC
 include_directories(
 	BEFORE
 	src/Libraries/2D/Source
+	src/Libraries/2D/Source/RSD
 	src/Libraries/3D/Source
 	src/Libraries/AFILE/Source
 	src/Libraries/DSTRUCT/Source

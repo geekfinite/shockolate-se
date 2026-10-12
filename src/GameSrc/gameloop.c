@@ -59,6 +59,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // ----------
 uchar redraw_paused = TRUE;
 
+// Set by pause_game_func(): while TRUE, game_loop()'s paused branch keeps
+// repainting the frame on every paused tick instead of letting the picture
+// freeze (see there for details). Screens that fake a pause by setting
+// game_paused directly (logs/emails -- vmail.c) never touch this flag, so
+// their displays keep the old frozen-frame behaviour.
+uchar render_while_paused = FALSE;
+
 // ----------
 // PROTOTYPES
 // ----------
@@ -105,6 +112,9 @@ void draw_pause_string(void) {
 //------------------------------------------------------------------
 void game_loop(void) {
     extern uchar game_paused;
+    extern uchar wrapper_panel_on;
+    extern char last_message[];
+    extern void opanel_redraw(uchar back);
     // temp
     // extern char saveArray[16];
     // if (memcmp(0, saveArray, 16))
@@ -112,19 +122,51 @@ void game_loop(void) {
 
     // Handle paused game state
     if (game_paused) {
-        if (redraw_paused) {
-            TRACE("%s: Drawing pause!", __FUNCTION__);
+        if (render_while_paused) {
+            // Repaint the whole frame on every paused tick: the world view,
+            // the fullscreen HUD plane, and the pause UI drawn over them. The
+            // frame used to freeze until play resumed -- nothing re-rendered
+            // while paused -- which left stale pixels behind anything drawn
+            // over it afterwards (pause-menu widgets, HUD layout changes).
+            // Draw-only: no game state advances; update_state/ai/physics are
+            // still skipped for paused frames.
+            //
+            // The forced variant ignores the "view obscured" early-out that
+            // the open pause menu would otherwise trigger. It also re-draws
+            // the fullscreen HUD plane (fullscreen_overlay() runs at the tail
+            // of the view draw), so no separate overlay call is needed here.
+            loopLine(GL | 0x1A, render_world_force());
+
+            // The repaint covered the pause UI that sits on top of the view,
+            // so put it back, in the order the normal paths draw it: wrapper
+            // panel, its message line, the "Paused." stamp, then the cursor.
+            if (wrapper_panel_on) {
+                opanel_redraw(TRUE);
+                // Redraw the current message (calling with last_message
+                // itself = draw-only; also blanks the strip when empty).
+                message_info(last_message);
+            }
             draw_pause_string();
             redraw_paused = FALSE;
+            uiShowMouse(NULL);
+        } else {
+            // Modal screens that own the display (logs/emails etc. set
+            // game_paused directly, see vmail.c) keep the old one-shot
+            // behaviour.
+            if (redraw_paused) {
+                TRACE("%s: Drawing pause!", __FUNCTION__);
+                draw_pause_string();
+                redraw_paused = FALSE;
+            }
+            // Keep the fullscreen 2D HUD plane fresh while paused. render_run()
+            // (the world) stays skipped, so the game state does not advance, but
+            // the HUD overlay is what leaves stale pixels behind when the pause
+            // menu redraws widgets over it -- redrawing it (not the world) each
+            // paused frame clears those artifacts immediately instead of only when
+            // play resumes.
+            if (full_game_3d)
+                loopLine(GL | 0x1A, fullscreen_overlay());
         }
-        // Keep the fullscreen 2D HUD plane fresh while paused. render_run()
-        // (the world) stays skipped, so the game state does not advance, but
-        // the HUD overlay is what leaves stale pixels behind when the pause
-        // menu redraws widgets over it -- redrawing it (not the world) each
-        // paused frame clears those artifacts immediately instead of only when
-        // play resumes.
-        if (full_game_3d)
-            loopLine(GL | 0x1A, fullscreen_overlay());
         // KLC - does nothing!  loopLine(GL|0x1D,synchronous_update());
         if (music_on)
             loopLine(GL|0x1C, mlimbs_do_ai());

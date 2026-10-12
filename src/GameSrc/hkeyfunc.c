@@ -1301,8 +1301,14 @@ uchar unpause_callback(uiEvent *, LGRegion *, void *) { return (TRUE); }
 
 uchar pause_game_func(ushort keycode, uint32_t context, intptr_t data) {
     extern uchar game_paused, redraw_paused;
+    extern uchar render_while_paused;
 
     game_paused = !game_paused;
+    // Track the "live" pause state; game_loop()'s paused branch keeps the
+    // frame repainting while this is TRUE (see gameloop.c). Screens that
+    // fake a pause by setting game_paused directly (vmail.c) never touch
+    // this, so their displays keep the old frozen-frame behaviour.
+    render_while_paused = game_paused;
     CaptureMouse(!game_paused);
 
     extern LGCursor globcursor;
